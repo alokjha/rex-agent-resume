@@ -89,8 +89,10 @@ if [ -f "$config" ] && ! "$rex" config check >/dev/null 2>&1; then
 fi
 
 backup
+gap=
+if [ -s "$config" ]; then gap=1; fi
 {
-  [ -f "$config" ] && [ -s "$config" ] && echo
+  if [ -n "$gap" ]; then echo; fi
   echo "$begin"
   echo "-- Resumes Claude Code and Codex in their panes after Rex restarts."
   echo "-- https://github.com/alokjha/rex-agent-resume"
