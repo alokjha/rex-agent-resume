@@ -26,18 +26,19 @@ git clone https://github.com/alokjha/rex-agent-resume ~/.config/rex/rex-agent-re
 ~/.config/rex/rex-agent-resume/install.sh --key shift+cmd+r
 ```
 
-`--key` is optional: it binds a key to **Resume Agents** (see [Resume by hand](#resume-by-hand)). Without it, the action is still in Rex's command palette.
+`--key` is optional: it binds a key to **Resume Agents** (see [Resume by hand](#resume-by-hand)). Without it, the action is still in Rex's command palette. A key already bound to something else is refused.
 
 `install.sh`:
 
 1. backs up your `init.lua` (`$REX_CONFIG`, else `$XDG_CONFIG_HOME/rex/init.lua`, else `~/.config/rex/init.lua`) next to it, as `init.lua.bak-rex-agent-resume-<date>-<pid>`;
-2. adds a block marked `-- >>> rex-agent-resume >>>` that loads `rex-agent-resume.lua` from the clone, plus the key binding if you passed one;
-3. checks the result with `rex config check`, and takes the block out again if the check fails;
-4. reloads Rex's config, which starts the watcher.
+2. adds a block marked `-- >>> rex-agent-resume >>>` that loads `rex-agent-resume.lua` from the clone, plus the key binding if you passed one (run it again to change or drop the key: it rewrites its own block and leaves the rest of the file alone);
+3. checks the result with `rex config check`, and puts the old file back if the check fails;
+4. names any other background Rex scripts that are running, since another tool that resumes agents would run as one;
+5. reloads Rex's config, which starts the watcher, and reports how many agent panes the watcher has recorded.
 
 Keep the clone where you put it: `init.lua` loads the tool from there.
 
-**Don't combine it with another agent-restore tool**, such as the agent restore in [sshtab](https://github.com/luongnv89/rex-extensions/tree/main/sshtab) (turn that part off with its **Restore Agent Sessions** action). Two tools would type the resume command twice into each pane.
+**Run only one tool that resumes agents after a restart.** Two would type the resume command twice into each pane. If you already use one, turn off its agent restore or remove it before installing this.
 
 ### Check that it works
 
@@ -58,7 +59,7 @@ Then quit Rex completely and open it again. Within a few seconds of each pane's 
 
 ### Update and remove
 
-- **Update:** `git -C ~/.config/rex/rex-agent-resume pull`, then `rex config reload`.
+- **Update:** `~/.config/rex/rex-agent-resume/install.sh --update` pulls the latest version and reloads Rex's config.
 - **Remove:** `~/.config/rex/rex-agent-resume/install.sh --uninstall`. It takes the block out of `init.lua` (with a backup) and stops the watcher. Its records in `~/.local/state/rex-agent-resume/` are left for you to delete.
 
 ## Resume by hand
