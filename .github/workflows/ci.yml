@@ -9,4 +9,6 @@ jobs:
       - name: Every Lua file compiles
         run: for f in *.lua test/*.lua; do lua5.1 -e "assert(loadfile('$f'))" || exit 1; done
       - run: lua5.1 test/run.lua
-      - run: shellcheck install.sh
+      - run: shellcheck install.sh test/install_test.sh
+      - name: install.sh tests
+        run: sh test/install_test.sh

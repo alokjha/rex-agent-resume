@@ -185,6 +185,7 @@ Run the tests with Lua 5.1 (the version Rex embeds), or with Rex itself:
 ```sh
 lua5.1 test/run.lua
 rex do test/run.lua
+sh test/install_test.sh    # install.sh, against scratch configs and a fake rex
 ```
 
 To try a restore without restarting Rex, make a scratch pane, and a scratch state folder whose `state.json` says that pane ran Claude Code under another server. Then start a watcher on it with `restore_test=1`, which counts the 120 seconds from now instead of from the server's start. Use a made-up conversation ID, so no real conversation is opened twice (Claude Code then says it can't find it):
