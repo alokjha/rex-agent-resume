@@ -3,173 +3,181 @@
 
 local M = {}
 
-M.RESTORE_WINDOW = 120 -- seconds after a server starts that panes may be typed into
-M.SWEEP = 15           -- seconds between timed sweeps
-M.MISSES = 2           -- timed sweeps an agent must be missing from before it's forgotten
-M.SHELLS = { zsh = true, bash = true, fish = true }
+M.RESTORE_WINDOW_SECONDS = 120 -- after a server starts, how long panes may be typed into
+M.SWEEP_INTERVAL_SECONDS = 15  -- between timed sweeps of every pane
+M.MISSES_BEFORE_FORGETTING = 2 -- timed sweeps in a row an agent must be missing from
+M.TYPEABLE_SHELLS = { zsh = true, bash = true, fish = true }
 M.STATE_VERSION = 1
 
-local UUID = "^%x%x%x%x%x%x%x%x%-%x%x%x%x%-%x%x%x%x%-%x%x%x%x%-%x%x%x%x%x%x%x%x%x%x%x%x$"
+local UUID_PATTERN = "^%x%x%x%x%x%x%x%x%-%x%x%x%x%-%x%x%x%x%-%x%x%x%x%-%x%x%x%x%x%x%x%x%x%x%x%x$"
 
-function M.is_uuid(s)
-  return type(s) == "string" and s:find(UUID) ~= nil
+function M.is_uuid(value)
+  return type(value) == "string" and value:find(UUID_PATTERN) ~= nil
 end
 
 -- Single-quoted for zsh, bash and fish alike. A backslash inside single quotes
--- means something different to fish, so a string holding one is refused.
-function M.sh_quote(s)
-  s = tostring(s)
-  if s:find("\\", 1, true) then return nil end
-  return "'" .. s:gsub("'", "'\\''") .. "'"
+-- means something different to fish, so text holding one is refused.
+function M.shell_quote(text)
+  text = tostring(text)
+  if text:find("\\", 1, true) then return nil end
+  return "'" .. text:gsub("'", "'\\''") .. "'"
 end
 
--- The line that resumes an entry's conversation in its folder, or nil and why.
-function M.resume_line(e)
-  if type(e) ~= "table" or not M.is_uuid(e.id) then return nil, "its session id isn't a UUID" end
-  local cmd
-  if e.agent == "claude" then cmd = "claude --resume " .. e.id
-  elseif e.agent == "codex" then cmd = "codex resume " .. e.id
-  else return nil, "unknown agent " .. tostring(e.agent) end
-  if e.cwd then
-    local q = M.sh_quote(e.cwd)
-    if not q then return nil, "its folder has a backslash" end
-    cmd = "cd " .. q .. " && " .. cmd
+-- The command that resumes an entry's conversation in its folder, or nil and why.
+function M.resume_command(entry)
+  if type(entry) ~= "table" or not M.is_uuid(entry.id) then return nil, "its session id isn't a UUID" end
+  local command
+  if entry.agent == "claude" then command = "claude --resume " .. entry.id
+  elseif entry.agent == "codex" then command = "codex resume " .. entry.id
+  else return nil, "unknown agent " .. tostring(entry.agent) end
+  if entry.cwd then
+    local quoted_folder = M.shell_quote(entry.cwd)
+    if not quoted_folder then return nil, "its folder has a backslash" end
+    command = "cd " .. quoted_folder .. " && " .. command
   end
-  return cmd
+  return command
 end
 
--- What is typed into a pane: Ctrl-U first, which clears anything left on the
--- line in zsh, bash and fish (in emacs and vi insert keys alike), then the line.
-function M.restore_input(line)
-  return "\21" .. line .. "\r"
+-- What is typed into a pane to run `command`: Ctrl-U first, which clears
+-- anything left on the line in zsh, bash and fish (in emacs and vi insert keys
+-- alike), then the command and Enter.
+function M.keystrokes_for(command)
+  return "\21" .. command .. "\r"
 end
 
 -- `ps -o etime=` ("[[dd-]hh:]mm:ss") in seconds.
-function M.parse_etime(text)
+function M.parse_elapsed_time(text)
   if type(text) ~= "string" then return nil end
   text = text:match("^%s*(.-)%s*$")
   local days, clock = text:match("^(%d+)%-(.+)$")
   clock = clock or text
-  local parts = {}
-  for n in clock:gmatch("[^:]+") do
-    if not n:find("^%d+$") then return nil end
-    parts[#parts + 1] = tonumber(n)
+  local fields = {}
+  for field in clock:gmatch("[^:]+") do
+    if not field:find("^%d+$") then return nil end
+    fields[#fields + 1] = tonumber(field)
   end
-  if #parts < 2 or #parts > 3 or (days and #parts ~= 3) then return nil end
-  local h = #parts == 3 and parts[1] or 0
-  return (tonumber(days) or 0) * 86400 + h * 3600 + parts[#parts - 1] * 60 + parts[#parts]
+  if #fields < 2 or #fields > 3 or (days and #fields ~= 3) then return nil end
+  local hours = #fields == 3 and fields[1] or 0
+  return (tonumber(days) or 0) * 86400 + hours * 3600 + fields[#fields - 1] * 60 + fields[#fields]
 end
 
 -- An ISO-8601 UTC time ("2026-11-13T15:58:36.49Z") in Unix seconds.
-function M.iso_to_epoch(text)
+function M.iso_to_unix_time(text)
   if type(text) ~= "string" then return nil end
-  local y, mo, d, h, mi, s = text:match("^(%d%d%d%d)%-(%d%d)%-(%d%d)T(%d%d):(%d%d):(%d%d)")
-  if not y then return nil end
-  y, mo, d = tonumber(y), tonumber(mo), tonumber(d)
-  if mo <= 2 then y = y - 1 end
-  local era = math.floor(y / 400)
-  local yoe = y - era * 400
-  local mp = (mo + 9) % 12
-  local doy = math.floor((153 * mp + 2) / 5) + d - 1
-  local doe = yoe * 365 + math.floor(yoe / 4) - math.floor(yoe / 100) + doy
-  local days = era * 146097 + doe - 719468
-  return days * 86400 + tonumber(h) * 3600 + tonumber(mi) * 60 + tonumber(s)
+  local year, month, day, hour, minute, second =
+    text:match("^(%d%d%d%d)%-(%d%d)%-(%d%d)T(%d%d):(%d%d):(%d%d)")
+  if not year then return nil end
+  year, month, day = tonumber(year), tonumber(month), tonumber(day)
+  -- Days since 1970-01-01 (Howard Hinnant's days_from_civil).
+  if month <= 2 then year = year - 1 end
+  local era = math.floor(year / 400)
+  local year_of_era = year - era * 400
+  local shifted_month = (month + 9) % 12
+  local day_of_year = math.floor((153 * shifted_month + 2) / 5) + day - 1
+  local day_of_era = year_of_era * 365 + math.floor(year_of_era / 4) - math.floor(year_of_era / 100) + day_of_year
+  local days = era * 146097 + day_of_era - 719468
+  return days * 86400 + tonumber(hour) * 3600 + tonumber(minute) * 60 + tonumber(second)
 end
 
--- A pane is at its shell when its foreground process is the program Rex
+-- Whether a pane is at its shell: its foreground process is the program Rex
 -- started (the terminal's child, often `login`) or that program's child.
-function M.at_shell(p)
-  if type(p) ~= "table" then return false end
-  local fg, child = p.foreground, p.child
-  if type(fg) ~= "table" or type(child) ~= "table" or not fg.pid then return false end
-  if fg.pid == child.pid then return true end
-  local parent = type(p.ancestors) == "table" and p.ancestors[1]
+-- `process` is the terminal's `process` reply.
+function M.is_at_shell(process)
+  if type(process) ~= "table" then return false end
+  local foreground, child = process.foreground, process.child
+  if type(foreground) ~= "table" or type(child) ~= "table" or not foreground.pid then return false end
+  if foreground.pid == child.pid then return true end
+  local parent = type(process.ancestors) == "table" and process.ancestors[1]
   return type(parent) == "table" and parent.pid == child.pid
 end
 
-function M.program(fg)
-  if type(fg) ~= "table" then return nil end
-  local name = (fg.argv0 or fg.name or ""):match("([^/]+)$") or ""
+-- A process's program name, without its folder or a login shell's leading "-".
+function M.program_name(process_info)
+  if type(process_info) ~= "table" then return nil end
+  local name = (process_info.argv0 or process_info.name or ""):match("([^/]+)$") or ""
   return (name:gsub("^%-", ""))
 end
 
--- From `ps -ww -o etime=,args=`: the process's age and its arguments as words.
--- ps joins arguments with spaces, so an argument holding one comes back split.
-function M.parse_ps(line)
+-- From `ps -ww -o etime=,args=`: the process's age in seconds and its
+-- arguments as words. ps joins arguments with spaces, so an argument holding
+-- one comes back split.
+function M.parse_ps_line(line)
   if type(line) ~= "string" then return nil end
-  local etime, args = line:match("^%s*(%S+)%s+(.-)%s*$")
-  local age = M.parse_etime(etime)
-  if not age then return nil end
-  local words = {}
-  for w in args:gmatch("%S+") do words[#words + 1] = w end
-  return age, words
+  local elapsed, command_line = line:match("^%s*(%S+)%s+(.-)%s*$")
+  local age_seconds = M.parse_elapsed_time(elapsed)
+  if not age_seconds then return nil end
+  local argv = {}
+  for word in command_line:gmatch("%S+") do argv[#argv + 1] = word end
+  return age_seconds, argv
 end
 
 -- The conversation a codex command line names: `codex [options] resume X`.
 -- Returns { uuid = X } or { name = X }, or nil.
-function M.codex_target(words)
-  if type(words) ~= "table" then return nil end
-  for i = 2, #words do
-    if words[i] == "resume" then
-      local x = words[i + 1]
-      if not x or x:sub(1, 1) == "-" then return nil end
-      if M.is_uuid(x) then return { uuid = x } end
-      return { name = table.concat(words, " ", i + 1) }
-    elseif words[i]:sub(1, 1) ~= "-" and words[i - 1]:sub(1, 1) ~= "-" then
+function M.codex_resume_target(argv)
+  if type(argv) ~= "table" then return nil end
+  for i = 2, #argv do
+    if argv[i] == "resume" then
+      local target = argv[i + 1]
+      if not target or target:sub(1, 1) == "-" then return nil end
+      if M.is_uuid(target) then return { uuid = target } end
+      return { name = table.concat(argv, " ", i + 1) }
+    elseif argv[i]:sub(1, 1) ~= "-" and argv[i - 1]:sub(1, 1) ~= "-" then
       return nil -- another subcommand, or a prompt (a word after an option is its value)
     end
   end
   return nil
 end
 
--- The thread name Codex shows in its title, "NAME | FOLDER", or the title.
-function M.codex_title_name(title)
+-- The thread name Codex shows in its title, "NAME | FOLDER", or the whole title.
+function M.codex_thread_name_from_title(title)
   if type(title) ~= "string" or title == "" then return nil end
   return title:match("^(.-) | [^|]*$") or title
 end
 
--- Picks a Codex TUI's thread from `rows` (Codex's threads in its folder that
--- were written since it started, or that its command line names, newest
--- first). `shared` says another Codex runs in the same folder.
-function M.pick_codex_thread(rows, title, target, shared)
-  if type(rows) ~= "table" or #rows == 0 then return nil end
-  local name = M.codex_title_name(title)
-  local named = {}
-  for _, r in ipairs(rows) do
-    if name and r.name == name then named[#named + 1] = r.id end
+-- Chooses a Codex TUI's thread from `threads`: Codex's threads in its folder
+-- that were written since it started (`written_since_start`) or that its
+-- command line names (`resume_target`), newest first. `folder_is_shared` says
+-- another Codex runs in the same folder. Returns the thread ID, or nil and why.
+function M.choose_codex_thread(threads, title, resume_target, folder_is_shared)
+  if type(threads) ~= "table" or #threads == 0 then return nil end
+  local title_name = M.codex_thread_name_from_title(title)
+  local named_in_title = {}
+  for _, thread in ipairs(threads) do
+    if title_name and thread.name == title_name then named_in_title[#named_in_title + 1] = thread.id end
   end
-  if #named == 1 then return named[1] end
-  if target then
-    for _, r in ipairs(rows) do
-      if (target.uuid and r.id == target.uuid) or (target.name and r.name == target.name) then
-        if not shared then
-          -- Unless a newer thread was written since, the named one is it.
-          if rows[1].id == r.id or not rows[1].fresh then return r.id end
-        end
-      end
+  if #named_in_title == 1 then return named_in_title[1] end
+  if resume_target and not folder_is_shared then
+    local newest = threads[1]
+    for _, thread in ipairs(threads) do
+      local is_target = (resume_target.uuid and thread.id == resume_target.uuid)
+        or (resume_target.name and thread.name == resume_target.name)
+      -- Unless a newer thread was written since, the one it resumed is it.
+      if is_target and (newest.id == thread.id or not newest.written_since_start) then return thread.id end
     end
   end
-  if not shared then return rows[1].id end
+  if not folder_is_shared then return threads[1].id end
   return nil, "another Codex runs in the same folder and its title doesn't name one thread"
 end
 
 -- Of Codex's session_index.jsonl text, the newest ID with this thread name.
-function M.codex_id_by_name(index_text, name, decode)
-  if not index_text or not name then return nil end
+function M.codex_id_from_index(index_text, thread_name, decode_json)
+  if not index_text or not thread_name then return nil end
   local found
   for line in index_text:gmatch("[^\n]+") do
-    local ok, e = pcall(decode, line)
-    if ok and type(e) == "table" and e.thread_name == name and M.is_uuid(e.id) then found = e.id end
+    local ok, indexed = pcall(decode_json, line)
+    if ok and type(indexed) == "table" and indexed.thread_name == thread_name and M.is_uuid(indexed.id) then
+      found = indexed.id
+    end
   end
   return found
 end
 
--- The last line of a pane's screen, used to see whether its prompt is drawn
--- and nothing is being typed.
-function M.cursor_line(content)
-  if type(content) ~= "string" then return nil end
-  content = content:gsub("[\r\n%s]+$", "")
-  return content:match("([^\n]*)$")
+-- The last non-blank line of a pane's screen: its prompt line, once the prompt
+-- is drawn. Watching it stay the same shows nothing is being typed.
+function M.last_screen_line(screen_text)
+  if type(screen_text) ~= "string" then return nil end
+  screen_text = screen_text:gsub("[\r\n%s]+$", "")
+  return screen_text:match("([^\n]*)$")
 end
 
 -- state.json --------------------------------------------------------------
@@ -177,58 +185,63 @@ end
 --   { version, instance_id, swept_at,
 --     panes = { [block_id] = { agent, id, cwd, session, seen_at, missed } } }
 
-function M.new_state(instance)
-  return { version = M.STATE_VERSION, instance_id = instance, panes = {} }
+function M.new_state(instance_id)
+  return { version = M.STATE_VERSION, instance_id = instance_id, panes = {} }
 end
 
-function M.clean_state(raw)
+-- A state read from disk, with anything malformed dropped.
+function M.sanitize_state(raw)
   if type(raw) ~= "table" or raw.version ~= M.STATE_VERSION or type(raw.panes) ~= "table" then
     return M.new_state(nil)
   end
   local panes = {}
-  for block_id, e in pairs(raw.panes) do
-    if type(block_id) == "string" and type(e) == "table" and M.resume_line(e) then panes[block_id] = e end
+  for block_id, entry in pairs(raw.panes) do
+    if type(block_id) == "string" and type(entry) == "table" and M.resume_command(entry) then
+      panes[block_id] = entry
+    end
   end
   raw.panes = panes
   return raw
 end
 
--- Records what a sweep saw in one pane. Returns true when it changed.
-function M.observe(state, block_id, seen, now)
+-- Records the agent a sweep found in a pane. Returns true when it's new or changed.
+function M.record_agent(state, block_id, found, now)
   local old = state.panes[block_id]
-  local changed = not old or old.agent ~= seen.agent or old.id ~= seen.id
-  state.panes[block_id] = { agent = seen.agent, id = seen.id, cwd = seen.cwd,
-                            session = seen.session, seen_at = now, missed = 0 }
+  local changed = not old or old.agent ~= found.agent or old.id ~= found.id
+  state.panes[block_id] = { agent = found.agent, id = found.id, cwd = found.cwd,
+                            session = found.session, seen_at = now, missed = 0 }
   return changed
 end
 
--- A pane where a sweep saw no agent. Only a timed sweep forgets, and only after
--- M.MISSES in a row: quitting Rex closes the agents seconds before the server
--- stops, and the sweeps that triggers must not lose them. A closed pane
--- (`gone`) is forgotten at the first timed sweep. Returns true if forgotten.
-function M.miss(state, block_id, gone, timed)
-  local e = state.panes[block_id]
-  if not e or not timed then return false end
-  e.missed = (e.missed or 0) + 1
-  if gone or e.missed >= M.MISSES then
+-- Notes that a sweep found no agent in a pane. Only a timed sweep forgets one,
+-- and only after MISSES_BEFORE_FORGETTING in a row: quitting Rex closes the
+-- agents seconds before the server stops, and the sweeps that triggers must not
+-- lose them. A closed pane is forgotten at the first timed sweep. Returns true
+-- when the pane's agent was forgotten.
+function M.note_agent_missing(state, block_id, pane_closed, timed_sweep)
+  local entry = state.panes[block_id]
+  if not entry or not timed_sweep then return false end
+  entry.missed = (entry.missed or 0) + 1
+  if pane_closed or entry.missed >= M.MISSES_BEFORE_FORGETTING then
     state.panes[block_id] = nil
     return true
   end
   return false
 end
 
--- The panes to type into after a restart, sorted by block ID, with one pane
--- per conversation. `previous` is the state the last server left.
-function M.plan_restore(previous)
-  local ids, plan, seen = {}, {}, {}
-  for block_id in pairs(previous.panes or {}) do ids[#ids + 1] = block_id end
-  table.sort(ids)
-  for _, block_id in ipairs(ids) do
-    local e = previous.panes[block_id]
-    local key = e.agent .. " " .. e.id
-    if not seen[key] then
-      seen[key] = true
-      plan[#plan + 1] = { block_id = block_id, entry = e }
+-- The panes to type into after a restart, sorted by block ID, with one pane per
+-- conversation: { { block_id, entry }, ... }. `previous_state` is what the last
+-- server left.
+function M.plan_restore(previous_state)
+  local block_ids, plan, planned = {}, {}, {}
+  for block_id in pairs(previous_state.panes or {}) do block_ids[#block_ids + 1] = block_id end
+  table.sort(block_ids)
+  for _, block_id in ipairs(block_ids) do
+    local entry = previous_state.panes[block_id]
+    local conversation = entry.agent .. " " .. entry.id
+    if not planned[conversation] then
+      planned[conversation] = true
+      plan[#plan + 1] = { block_id = block_id, entry = entry }
     end
   end
   return plan
