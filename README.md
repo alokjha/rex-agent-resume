@@ -1,100 +1,184 @@
 # rex-agent-resume
 
-Brings your Claude Code and Codex conversations back into their [Rex](https://www.superlogical.com/rex) panes after the Rex server restarts: when you quit and reopen Rex, reboot, or update it.
+Brings your Claude Code and Codex conversations back into their [Rex](https://www.superlogical.com/rex) panes after the Rex server restarts: when you quit and reopen Rex, reboot, or Rex updates.
 
-Rex already restores your sessions, tabs, splits and each pane's folder, but the programs in them stop. This watches which conversation runs in which pane, and when a new server starts, types the line that resumes it:
+Rex already brings back your sessions, tabs, splits and each pane's folder after a restart, but the programs that ran in the panes are gone: you get plain shells. This tool remembers which conversation ran in which pane, and once Rex is back, types the command that resumes it into that pane:
 
 ```
-pane was running   codex  (thread 0193f2a4…, started as `codex` and later named)
-types              cd '/Users/you/project' && codex resume 0193f2a4-5b6c-7d8e-9f01-23456789abcd
+before the restart   a pane in ~/code/app was running Claude Code, conversation 3f2a1b4c-…
+after the restart    it types:  cd '/Users/you/code/app' && claude --resume 3f2a1b4c-5d6e-4f70-8192-a3b4c5d6e7f8
 ```
+
+It works however the agent was started: `claude`, `claude --resume …`, plain `codex`, `codex resume <id>` or `codex resume <name>`.
+
+## Requirements
+
+- Rex, with its server restoring your sessions (the default).
+- Claude Code and/or Codex, on the `PATH` of a new shell.
+- `sqlite3` on `PATH` for the most reliable Codex results (macOS includes it). Without it, Codex conversations are found from the command line and the tab title only.
+
+Developed and tested on macOS 27 with Rex 0.1.0 previews (up to preview.18), Claude Code 2.1 and Codex 0.167 to 0.169. Linux should work, except the failure notifications, which use macOS's `osascript`; it hasn't been tested there.
 
 ## Install
-
-Needs Rex on macOS or Linux, and `sqlite3` for the best Codex results (macOS has it).
 
 ```sh
 git clone https://github.com/alokjha/rex-agent-resume ~/.config/rex/rex-agent-resume
 ~/.config/rex/rex-agent-resume/install.sh --key shift+cmd+r
 ```
 
-`install.sh` backs up your `init.lua`, adds a marked block that loads `rex-agent-resume.lua` (and binds the key, if you pass `--key`), checks it with `rex config check`, and reloads the config. Without a key, the action is in the command palette as **Resume Agents**.
+`--key` is optional: it binds a key to **Resume Agents** (see [Resume by hand](#resume-by-hand)). Without it, the action is still in Rex's command palette.
 
-- Update: `git pull` in the clone, then `rex config reload`.
-- Remove: `./install.sh --uninstall`. It takes the block out (with a backup) and stops the watcher. Its records in `~/.local/state/rex-agent-resume` are left for you to remove.
+`install.sh`:
+
+1. backs up your `init.lua` (`$REX_CONFIG`, else `$XDG_CONFIG_HOME/rex/init.lua`, else `~/.config/rex/init.lua`) next to it, as `init.lua.bak-rex-agent-resume-<date>-<pid>`;
+2. adds a block marked `-- >>> rex-agent-resume >>>` that loads `rex-agent-resume.lua` from the clone, plus the key binding if you passed one;
+3. checks the result with `rex config check`, and takes the block out again if the check fails;
+4. reloads Rex's config, which starts the watcher.
+
+Keep the clone where you put it: `init.lua` loads the tool from there.
+
+**Don't combine it with another agent-restore tool**, such as the agent restore in [sshtab](https://github.com/luongnv89/rex-extensions/tree/main/sshtab) (turn that part off with its **Restore Agent Sessions** action). Two tools would type the resume command twice into each pane.
+
+### Check that it works
+
+```sh
+cd ~/.config/rex/rex-agent-resume
+rex do --all watcher.lua mode=status
+```
+
+lists every pane with an agent it has recorded, for example:
+
+```
+server 5963dd25-…, last timed sweep 18:03:53
+  api                  claude 3f2a1b4c-5d6e-4f70-8192-a3b4c5d6e7f8  /Users/you/code/api
+  web                  codex  0193f2a4-5b6c-7d8e-9f01-23456789abcd  /Users/you/code/web
+```
+
+Then quit Rex completely and open it again. Within a few seconds of each pane's prompt appearing, its agent starts again.
+
+### Update and remove
+
+- **Update:** `git -C ~/.config/rex/rex-agent-resume pull`, then `rex config reload`.
+- **Remove:** `~/.config/rex/rex-agent-resume/install.sh --uninstall`. It takes the block out of `init.lua` (with a backup) and stops the watcher. Its records in `~/.local/state/rex-agent-resume/` are left for you to delete.
+
+## Resume by hand
+
+**Resume Agents** (the key you chose, the command palette, or `rex do --all ~/.config/rex/rex-agent-resume/watcher.lua mode=resume`) types the last restart's conversations into any recorded pane that is at a shell prompt and isn't running its agent. Use it when a pane wasn't ready in time, or after you quit an agent by mistake.
 
 ## How it works
 
-Loading `rex-agent-resume.lua` starts `watcher.lua` in the background (`rex do --all`) each time the server loads its config. Only one watcher runs: the newest replaces an older one, and watchers started at the same moment settle on one before any of them types.
+`rex-agent-resume.lua`, loaded by `init.lua`, starts `watcher.lua` in the background each time Rex loads its config. Only one watcher runs: the newest replaces an older one, and watchers started at the same moment agree on one before any of them types.
 
-**Recording.** The watcher looks at every pane when a pane's program changes or a pane closes, and every 15 seconds, which catches Claude's `/clear` and `/resume`.
+### Recording which conversation runs where
+
+The watcher looks at every pane when a pane's program changes or a pane closes, and every 15 seconds, which also catches a conversation switched inside the agent (Claude's `/clear` and `/resume`). Rex keeps a pane's ID across restarts, so the record is keyed by pane.
 
 | Agent | Where the conversation ID comes from |
 | --- | --- |
-| Claude Code | `~/.claude/sessions/<pid>.json`, which Claude keeps for each running process. A conversation is recorded once its transcript exists. |
-| Codex | Codex's state database (`~/.codex/state_N.sqlite`): the threads in the pane's folder written since that Codex started. With several Codex in one folder, the thread name in the pane's title picks one; if it can't, the pane is skipped rather than guessed. If the database can't be read: `codex resume <UUID>` on the command line, then the title's name in `~/.codex/session_index.jsonl`. So plain `codex` and `codex resume <name>` are covered too. |
+| Claude Code | `~/.claude/sessions/<pid>.json`, which Claude Code writes for each running process. A conversation is recorded once its transcript exists (before its first message there's nothing to resume). |
+| Codex | Codex doesn't record which process runs which conversation, so it's worked out: the conversations ("threads") in Codex's state database, `~/.codex/state_N.sqlite`, that are in the pane's folder and were written since that Codex started. If two Codex panes share a folder, the conversation name Codex shows in the tab title decides; if it can't, the pane isn't guessed (see [Limits](#limits)). If the database can't be read, it falls back to `codex resume <id>` on the command line, then to the title's name in `~/.codex/session_index.jsonl`. |
 
-**Quitting.** Rex closes the agents a few seconds before its server stops. So that doesn't erase them, a pane's agent is forgotten only after two timed checks in a row miss it (or at once when the pane is closed).
+When you quit Rex, it closes the agents a few seconds before its server stops. So that doesn't wipe the record, an agent is forgotten only after two 15-second checks in a row don't find it (or at once if its pane is closed).
 
-**Restoring.** When the watcher first sees a new server, it moves what the last one ran to `restore.json`, then for each pane waits until:
+### Resuming after a restart
 
-- its foreground is the shell Rex started (zsh, bash or fish),
-- the shell's line editor is reading keys, and
-- the prompt line stays the same for a second.
+When the watcher first sees a new Rex server, it saves what the previous one ran in `restore.json` and steps each pane through these states, once a second:
 
-Then it sends Ctrl-U (clearing anything on the line) and `cd '<folder>' && claude --resume <id>` or `codex resume <id>`, with Enter. Each pane is marked before it is typed into, so it's never typed into twice, and one conversation recorded in two panes is resumed in the first only. Panes not ready within 120 seconds of the server starting are left alone, and a macOS notification lists them.
+```
+waiting ──prompt drawn──▶ prompt_seen ──same prompt a second later──▶ typed
+   ▲                           │
+   └────── anything else ──────┘
+```
 
-**Resume Agents** (the action, or `rex do --all watcher.lua mode=resume`) types the last server's conversations into recorded panes that are at a prompt and not running their agent. Use it after the 120 seconds, or after quitting an agent by accident.
+A pane counts as ready when its foreground program is the shell Rex started (zsh, bash or fish), the shell is reading keys, and its prompt line hasn't changed for a second, so nothing is being typed. It then gets Ctrl-U (clearing the line), the resume command and Enter.
+
+- A pane is marked before it's typed into, so it's never typed into twice, even if the watcher is replaced mid-restore.
+- A conversation recorded in two panes is resumed in the first only.
+- A pane already running its agent is left alone.
+- After 120 seconds the restore is finished: panes that weren't ready are left as they are, and a macOS notification lists them. A finished restore never runs again, even after a config reload.
 
 ## Files
 
-In `~/.local/state/rex-agent-resume/` (or `$XDG_STATE_HOME`), readable only by you:
+In `~/.local/state/rex-agent-resume/` (or `$XDG_STATE_HOME/rex-agent-resume/`), readable only by you:
 
-- `state.json`: for each pane with an agent, the agent, conversation ID, folder and session name.
-- `restore.json`: what the last server ran, which panes were typed into, whether the restore is `pending` or `finished` (a finished one is never run again), and why any pane failed.
-- `watcher.log` (rotated at 1 MB) and `watcher.pid`.
+| File | Holds |
+| --- | --- |
+| `state.json` | For each pane with an agent: the agent, the conversation ID, the folder and the Rex session's name. |
+| `restore.json` | What the previous server ran, which panes were typed into, whether the restore is `pending` or `finished`, and why any pane couldn't be resumed. |
+| `watcher.log` | What the watcher did, rotated at 1 MB. |
+| `watcher.pid` | The running watcher's process ID. |
 
-No prompts, transcripts or environment are read or kept, apart from the Claude session file and Codex's thread IDs and names. Nothing leaves your machine.
+It reads Claude Code's per-process session files, Codex's thread IDs, names and folders, and the panes' titles and last screen line. It checks that a Claude transcript exists without reading it, and reads no prompts and nothing from the agents' environment. Nothing leaves your machine.
 
-`rex do --all watcher.lua mode=status` prints what is recorded.
+## Troubleshooting
+
+Start with `watcher.log`. Each pane resumed has a `resumed …` line; anything that went wrong has a `warn:` line.
+
+| What you see | Why, and what to do |
+| --- | --- |
+| A pane came back as a plain shell | It probably wasn't at a prompt within 120 seconds (a slow shell start, or something else running). Press **Resume Agents**. |
+| Codex stopped at "Update available" or a folder-trust question | Those are Codex's own prompts. Answer them; the conversation resumes after. |
+| `command not found: claude` (or `codex`) | The agent isn't on the `PATH` of a new shell. Fix your shell's `PATH`. |
+| A Codex pane is missing from `mode=status` | Another Codex runs in the same folder and their names don't tell them apart. Give the conversations distinct names with Codex's `/rename`. |
+| Nothing is recorded at all | Check that `init.lua` has the `rex-agent-resume` block, that `rex config check` passes, and that a watcher runs: `cat ~/.local/state/rex-agent-resume/watcher.pid`. |
 
 ## Limits
 
 - Agents resume with their default options: flags such as `--model` or a permission mode aren't carried over.
-- Only Claude Code and Codex. Only zsh, bash and fish panes are typed into.
-- A pane in zsh vi command mode (not insert mode) may not take the line correctly.
-- A folder holding a backslash isn't restored, as fish reads single-quoted backslashes differently.
-- Two Codex panes in the same folder are told apart by the thread name in their titles. If both are unnamed or share a name, the pane keeps the last ID it was sure of, or isn't recorded. Give such threads distinct names with Codex's `/rename`. A Codex `SessionStart` hook can't fix this: Codex's shared background service runs hooks, with the environment of whichever pane started it, so a hook can't tell which pane it's for.
-- `CLAUDE_CONFIG_DIR` and `CODEX_HOME` are read from the Rex server's environment, not each agent's.
-- Codex's database and session files are Codex's own formats and may change; each has a fallback, and the log says when one is used.
+- Only Claude Code and Codex, and only panes running zsh, bash or fish.
+- A pane closed while Rex was down isn't brought back.
+- A shell left in vi command mode (not insert mode) may not take the typed line correctly.
+- A folder whose path holds a backslash isn't restored, because fish reads single-quoted backslashes differently from zsh and bash.
+- Two Codex panes in the same folder are told apart only by their conversation names. If both are unnamed or share a name, the pane keeps the last ID it was sure of, or isn't recorded. A Codex `SessionStart` hook can't fix this: Codex's shared background service runs hooks with the environment of whichever pane started it, so a hook can't tell which pane it's for.
+- `CLAUDE_CONFIG_DIR` and `CODEX_HOME` are read from the Rex server's environment, not from each agent's.
+- Codex's database and index are Codex's own formats and may change between versions. Each has a fallback, and the log says when one is used.
 - `rex config check` runs `init.lua`, so it starts a watcher too. That one replaces the running watcher, which is harmless.
 
 ## Develop
 
+| File | Does |
+| --- | --- |
+| `rex-agent-resume.lua` | Loaded by `init.lua`: starts the watcher and adds the Resume Agents action. |
+| `watcher.lua` | The watcher, plus `mode=resume` and `mode=status`. Everything that talks to Rex. |
+| `lib.lua` | The logic that doesn't need Rex: parsing, choosing a Codex thread, when to forget, the restore states. The tests cover it. |
+| `install.sh` | Adds the tool to `init.lua`, or `--uninstall` takes it out. |
+
+Run the tests with Lua 5.1 (the version Rex embeds), or with Rex itself:
+
 ```sh
-lua5.1 test/run.lua       # or: rex do test/run.lua
+lua5.1 test/run.lua
+rex do test/run.lua
 ```
 
-`lib.lua` holds the logic that doesn't need Rex (parsing, choosing threads, when to forget, what to restore) and is what the tests cover. To try a restore without restarting Rex, point a watcher at a scratch folder whose `state.json` names another server, and pass `restore_test=1` to count the 120 seconds from now:
+To try a restore without restarting Rex, make a scratch pane, and a scratch state folder whose `state.json` says that pane ran Claude Code under another server. Then start a watcher on it with `restore_test=1`, which counts the 120 seconds from now instead of from the server's start. Use a made-up conversation ID, so no real conversation is opened twice (Claude Code then says it can't find it):
 
 ```sh
+rex new rar-test --json             # prints the new pane's block ID, "block:…"
+mkdir -p /tmp/rar-test
+cat > /tmp/rar-test/state.json <<'EOF'
+{"version": 1, "instance_id": "some-earlier-server",
+ "panes": {"<the block ID>":
+   {"agent": "claude", "id": "<any UUID, from uuidgen>", "cwd": "/tmp", "session": "rar-test"}}}
+EOF
 rex do --all watcher.lua state=/tmp/rar-test restore_test=1 notify=0
 ```
 
+The watcher should print `resumed claude … in rar-test`, and the pane should run `claude --resume`. Stop the watcher with Ctrl-C and close the pane with `rex kill rar-test`.
+
 ## History and credits
 
-This grew out of a resume script written for one person's own Rex setup and tested over several real restarts. Its approach is still the core of this one:
+This grew out of a resume script written for the author's own Rex setup and tested over several real restarts. Its approach is still the core of this one:
 
-- the conversation each pane runs, from Claude's per-process session file, and for Codex from `codex resume <UUID>` or the thread name in the pane's title looked up in `session_index.jsonl` (which covers plain `codex` and `codex resume <name>`);
+- the conversation each pane runs, from Claude Code's per-process session file, and for Codex from `codex resume <id>` or the conversation name in the pane's title, looked up in `session_index.jsonl` (which covers plain `codex` and `codex resume <name>`);
 - a record keyed by Rex's pane IDs, which survive restarts;
-- resuming once per new server instance, only into panes back at a shell prompt, never twice into one pane;
+- resuming once per new server, only into panes back at a shell prompt, never twice into one pane;
 - one watcher at a time, the newest replacing an older or stuck one, and the Resume Agents action.
 
 Two other projects solving the same problem had ideas worth adding, reimplemented here:
 
-- [thomasschafer/dotfiles#11](https://github.com/thomasschafer/dotfiles/pull/11): finding a Codex TUI's thread in Codex's state database, and checking a Claude transcript exists before recording its ID;
-- [sshtab](https://github.com/luongnv89/rex-extensions/tree/main/sshtab): forgetting an agent only after two missed checks, so quitting Rex doesn't erase them, and waiting for a steady prompt before typing.
+- [thomasschafer/dotfiles#11](https://github.com/thomasschafer/dotfiles/pull/11): finding a Codex conversation in Codex's state database, and checking that a Claude transcript exists before recording its ID;
+- [sshtab](https://github.com/luongnv89/rex-extensions/tree/main/sshtab): forgetting an agent only after two missed checks, so quitting Rex doesn't erase it, and waiting for a steady prompt before typing.
 
 ## License
 
-MIT
+MIT. See [LICENSE](LICENSE).
