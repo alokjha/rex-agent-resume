@@ -218,14 +218,16 @@ end
 
 local server_info -- { instance_id, started_at } of the server this watcher talks to
 local state       -- this server's panes (see lib.lua)
-local stopped = false
+-- The script's phase:  starting ──read the server──▶ running ──▶ stopped
+-- Handlers do nothing until it runs, and nothing after it stops.
+local phase = "starting"
 
 local function save_state() write_json(STATE_FILE, state) end
 
 -- Looks at every pane and records its agent. A timed sweep also forgets agents
 -- that are gone (see lib.note_agent_missing).
 local function sweep_panes(timed)
-  if stopped or not server_info then return end
+  if phase ~= "running" then return end
   local panes, complete = list_terminal_panes()
   -- A failed or empty read never replaces what is recorded.
   if not complete or #panes == 0 then return end
@@ -251,19 +253,19 @@ local function sweep_panes(timed)
     elseif program == "codex" then
       found, why = detect_codex(pane, foreground, (codex_count_by_folder[foreground.cwd] or 0) > 1)
     end
-    if found then
+    local finding = lib.classify_finding(process ~= nil, program, found ~= nil)
+    if finding == lib.FINDING.AGENT then
       found.session = pane.session
       if lib.record_agent(state, pane.block_id, found, now) then
         log("recorded " .. found.agent .. " " .. found.id .. " in " .. tostring(pane.session))
       end
-    elseif program == "claude" or program == "codex" then
-      -- The agent runs but its conversation can't be told now: keep what was recorded.
+    elseif finding == lib.FINDING.AGENT_UNIDENTIFIED then
       if why then rex.log("warn", program .. " in " .. tostring(pane.session) .. ": " .. why) end
-    elseif process ~= nil then
+    elseif finding == lib.FINDING.NO_AGENT then
       if lib.note_agent_missing(state, pane.block_id, false, timed) then
         log("forgot the agent in " .. tostring(pane.session) .. ": it stopped")
       end
-    end
+    end -- UNREADABLE: nothing changes
   end
   for block_id in pairs(state.panes) do
     if not live_panes[block_id] and lib.note_agent_missing(state, block_id, true, timed) then
@@ -287,76 +289,103 @@ local function notify(text)
     "display notification " .. applescript_string(text) .. ' with title "rex-agent-resume"' })
 end
 
+-- Looks at a pane once, for lib.next_pane_state.
+local function look_at_pane(pane, entry, typed_on_disk)
+  local look = { typed_elsewhere = typed_on_disk, pane_exists = pane ~= nil }
+  if not pane then return look end
+  local process = terminal_call(pane, "process")
+  local foreground = type(process) == "table" and process.foreground
+  if not foreground then return look end
+  look.agent_running = lib.program_name(foreground) == entry.agent
+  look.at_shell = lib.is_at_shell(process)
+  look.shell = lib.program_name(foreground)
+  if look.at_shell and lib.TYPEABLE_SHELLS[look.shell] then
+    local input_mode = terminal_call(pane, "input_mode")
+    look.editor_ready = input_mode and input_mode.canonical == false or false
+    if look.editor_ready then
+      local screen = terminal_call(pane, "format", { trim = true })
+      look.prompt_line = screen and lib.last_screen_line(screen.content)
+    end
+  end
+  return look
+end
+
 -- Types each planned conversation into its pane once the pane sits at a fresh
--- shell prompt. `restore` is restore.json: { for_instance, panes, typed }.
+-- shell prompt, stepping every pane through lib.PANE_STATE once a second.
+-- `restore` is restore.json: { for_instance, state, panes, typed, failed }.
 -- `deadline` is when to give up; `on_done` runs at the end. `manual` is the
 -- resume_agents action: it types into any recorded pane without its agent, and
 -- leaves restore.json as it is.
 local function resume_recorded_agents(restore, deadline, on_done, manual)
-  local waiting, last_line_by_pane, failures = {}, {}, {}
+  local S = lib.PANE_STATE
+  local panes = {} -- block_id -> { entry, state, prompt_line, why }
   for _, planned in ipairs(lib.plan_restore(restore)) do
-    if not restore.typed[planned.block_id] then waiting[planned.block_id] = planned.entry end
+    if not restore.typed[planned.block_id] then
+      local command, why = lib.resume_command(planned.entry)
+      panes[planned.block_id] = { entry = planned.entry, command = command,
+                                  state = command and S.WAITING or S.FAILED, why = why }
+    end
   end
-  local function fail(block_id, entry, why)
-    failures[#failures + 1] = entry.agent .. " in " .. tostring(entry.session) .. ": " .. why
-    waiting[block_id] = nil
-  end
+
+  local function describe(pane) return pane.entry.agent .. " in " .. tostring(pane.entry.session) end
+
   local function finish()
-    for block_id, entry in pairs(waiting) do fail(block_id, entry, "its pane wasn't at a shell prompt in time") end
+    local failures = {}
+    restore.failed = {}
+    for block_id, pane in pairs(panes) do
+      if not lib.is_final_pane_state(pane.state) then
+        pane.state, pane.why = S.FAILED, "its pane wasn't at a shell prompt in time"
+      end
+      if pane.state == S.FAILED then
+        failures[#failures + 1] = describe(pane) .. ": " .. pane.why
+        restore.failed[block_id] = pane.why
+      end
+    end
+    if not manual then
+      restore.state = lib.RESTORE_STATE.FINISHED
+      write_json(RESTORE_FILE, restore)
+    end
     if #failures > 0 then
       notify("Couldn't resume " .. #failures .. " agent(s): " .. table.concat(failures, "; "))
     end
     if on_done then on_done() end
   end
-  local function mark_typed(block_id)
-    restore.typed[block_id] = os.time()
-    waiting[block_id] = nil
-    if not manual then write_json(RESTORE_FILE, restore) end
-  end
-  local function try_waiting_panes()
-    if stopped then return end
-    if next(waiting) == nil or os.time() > deadline then return finish() end
+
+  local function step()
+    if phase == "stopped" then return end
+    local all_final = true
+    for _, pane in pairs(panes) do
+      if not lib.is_final_pane_state(pane.state) then all_final = false end
+    end
+    if all_final or os.time() > deadline then return finish() end
+
     local live_panes = {}
-    for _, pane in ipairs((list_terminal_panes())) do live_panes[pane.block_id] = pane end
-    for block_id, entry in pairs(waiting) do
-      local pane = live_panes[block_id]
-      local process = pane and terminal_call(pane, "process")
-      local foreground = type(process) == "table" and process.foreground
-      local command, why = lib.resume_command(entry)
-      if not command then
-        fail(block_id, entry, why)
-      elseif foreground and lib.program_name(foreground) == entry.agent then
-        log(entry.agent .. " already runs in " .. tostring(entry.session))
-        mark_typed(block_id)
-      elseif foreground and lib.is_at_shell(process) then
-        local shell = lib.program_name(foreground)
-        if not lib.TYPEABLE_SHELLS[shell] then
-          fail(block_id, entry, "its shell " .. tostring(shell) .. " isn't zsh, bash or fish")
-        else
-          -- The line editor is reading keys, and the prompt line stayed the same
-          -- for a second: the prompt is drawn and nothing is being typed.
-          local input_mode = terminal_call(pane, "input_mode")
-          local screen = input_mode and input_mode.canonical == false
-            and terminal_call(pane, "format", { trim = true })
-          local prompt_line = screen and lib.last_screen_line(screen.content)
-          local on_disk = not manual and read_json(RESTORE_FILE)
-          if type(on_disk) == "table" and type(on_disk.typed) == "table" and on_disk.typed[block_id] then
-            waiting[block_id] = nil -- another watcher typed it
-          elseif prompt_line and prompt_line ~= "" and prompt_line == last_line_by_pane[block_id] then
-            mark_typed(block_id) -- marked before typing, so a pane is never typed into twice
-            terminal_call(pane, "write", { data = lib.keystrokes_for(command) })
-            log("resumed " .. entry.agent .. " " .. entry.id .. " in " .. tostring(entry.session))
-          else
-            last_line_by_pane[block_id] = prompt_line
-          end
+    for _, live in ipairs((list_terminal_panes())) do live_panes[live.block_id] = live end
+    local on_disk = not manual and read_json(RESTORE_FILE)
+    local typed_on_disk = type(on_disk) == "table" and type(on_disk.typed) == "table" and on_disk.typed or {}
+
+    for block_id, pane in pairs(panes) do
+      if not lib.is_final_pane_state(pane.state) then
+        local live = live_panes[block_id]
+        local look = look_at_pane(live, pane.entry, typed_on_disk[block_id] ~= nil)
+        local next_pane, type_now = lib.next_pane_state(pane, look)
+        pane.state, pane.prompt_line, pane.why = next_pane.state, next_pane.prompt_line, next_pane.why
+        if type_now then
+          -- Marked before typing, so a pane is never typed into twice.
+          restore.typed[block_id] = os.time()
+          if not manual then write_json(RESTORE_FILE, restore) end
+          terminal_call(live, "write", { data = lib.keystrokes_for(pane.command) })
+          log("resumed " .. pane.entry.agent .. " " .. pane.entry.id .. " in " .. tostring(pane.entry.session))
+        elseif pane.state == S.ALREADY_RUNNING then
+          restore.typed[block_id] = os.time()
+          if not manual then write_json(RESTORE_FILE, restore) end
+          log(describe(pane) .. " already runs")
         end
-      else
-        last_line_by_pane[block_id] = nil
       end
     end
-    rex.after(1, try_waiting_panes)
+    rex.after(1, step)
   end
-  try_waiting_panes()
+  step()
 end
 
 -- The watcher -----------------------------------------------------------------
@@ -374,8 +403,8 @@ local function is_running_watcher(pid)
 end
 
 local function stop_watcher(why)
-  if stopped then return end
-  stopped = true
+  if phase == "stopped" then return end
+  phase = "stopped"
   log("watcher stops: " .. why)
   rex.stop(0)
 end
@@ -398,6 +427,7 @@ local function run_watcher()
 
   server_info = read_server_info()
   if not server_info then return stop_watcher("can't read the server's instance") end
+  phase = "running"
   log("watcher " .. tostring(my_pid) .. " started for server " .. server_info.instance_id)
 
   local saved_state = lib.sanitize_state(read_json(STATE_FILE))
@@ -407,7 +437,7 @@ local function run_watcher()
     local existing_restore = read_json(RESTORE_FILE)
     if not (type(existing_restore) == "table" and existing_restore.for_instance == server_info.instance_id) then
       write_json(RESTORE_FILE, { for_instance = server_info.instance_id, from_instance = saved_state.instance_id,
-                                 panes = saved_state.panes, typed = {} })
+                                 state = lib.RESTORE_STATE.PENDING, panes = saved_state.panes, typed = {} })
     end
     state = lib.new_state(server_info.instance_id)
     save_state()
@@ -423,9 +453,9 @@ local function run_watcher()
   -- Resuming waits until watchers started together have settled which one
   -- runs. A watcher replaced mid-restore leaves the rest to this one.
   rex.after(2, function()
-    if stopped or tonumber(read_file(PID_FILE) or "") ~= my_pid then return end
+    if phase ~= "running" or tonumber(read_file(PID_FILE) or "") ~= my_pid then return end
     local restore = read_json(RESTORE_FILE)
-    if type(restore) == "table" and restore.for_instance == server_info.instance_id and os.time() <= deadline then
+    if lib.should_run_restore(restore, server_info.instance_id, os.time(), deadline) then
       restore.typed = restore.typed or {}
       restore.panes = restore.panes or {}
       log("resuming the agents of server " .. tostring(restore.from_instance))
@@ -441,14 +471,14 @@ end
 if mode == "watch" then
   local sweep_scheduled = false
   local function sweep_soon()
-    if sweep_scheduled or not server_info then return end
+    if sweep_scheduled or phase ~= "running" then return end
     sweep_scheduled = true
     rex.after(2, function() sweep_scheduled = false sweep_panes(false) end)
   end
   rex.on("terminal.process_changed", sweep_soon)
   rex.on("block_closed", sweep_soon)
   rex.every(lib.SWEEP_INTERVAL_SECONDS, function()
-    if stopped or not server_info then return end
+    if phase ~= "running" then return end
     local current = read_server_info()
     -- A watcher that outlives its server leaves the new one to the watcher
     -- the new server starts.
@@ -460,13 +490,14 @@ if mode == "watch" then
   -- Config loads can start several watchers at once. The one whose pid is in
   -- the file is the watcher; the others stop.
   rex.every(1, function()
-    if stopped or not my_pid then return end
+    if phase ~= "running" or not my_pid then return end
     local pid_file_owner = tonumber(read_file(PID_FILE) or "")
     if pid_file_owner ~= my_pid then stop_watcher("watcher " .. tostring(pid_file_owner) .. " took over") end
   end)
 end
 
 local function run_manual_resume()
+  phase = "running"
   local restore = read_json(RESTORE_FILE)
   if type(restore) ~= "table" or type(restore.panes) ~= "table" then
     print("nothing to resume: no agents were recorded from an earlier server")
@@ -494,7 +525,12 @@ local function print_status()
       planned = planned + 1
       if restore.typed and restore.typed[block_id] then typed = typed + 1 end
     end
-    print("last restore: " .. typed .. " of " .. planned .. " agent(s) typed, for server " .. tostring(restore.for_instance))
+    print("last restore (" .. tostring(restore.state or "pending") .. "): " .. typed .. " of " .. planned
+      .. " agent(s) typed, for server " .. tostring(restore.for_instance))
+    for block_id, why in pairs(type(restore.failed) == "table" and restore.failed or {}) do
+      local entry = restore.panes[block_id]
+      print("  failed: " .. tostring(entry and entry.session) .. ": " .. tostring(why))
+    end
   end
   rex.stop(0)
 end

@@ -51,7 +51,7 @@ Then it sends Ctrl-U (clearing anything on the line) and `cd '<folder>' && claud
 In `~/.local/state/rex-agent-resume/` (or `$XDG_STATE_HOME`), readable only by you:
 
 - `state.json`: for each pane with an agent, the agent, conversation ID, folder and session name.
-- `restore.json`: what the last server ran, and which panes were typed into.
+- `restore.json`: what the last server ran, which panes were typed into, whether the restore is `pending` or `finished` (a finished one is never run again), and why any pane failed.
 - `watcher.log` (rotated at 1 MB) and `watcher.pid`.
 
 No prompts, transcripts or environment are read or kept, apart from the Claude session file and Codex's thread IDs and names. Nothing leaves your machine.

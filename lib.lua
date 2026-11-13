@@ -229,6 +229,105 @@ function M.note_agent_missing(state, block_id, pane_closed, timed_sweep)
   return false
 end
 
+-- Restoring one pane ----------------------------------------------------------
+--
+-- Each pane in a restore moves through these states, one step per look:
+--
+--   waiting ──prompt line read──▶ prompt_seen ──same line a second later──▶ typed
+--      ▲                              │
+--      └──────── anything else ───────┘
+--
+-- and from waiting or prompt_seen to the other final states:
+--   already_running  the agent runs in the pane already
+--   typed_elsewhere  another watcher typed it (restore.json says so)
+--   failed           it can't be typed into; `why` says why
+
+M.PANE_STATE = {
+  WAITING = "waiting",
+  PROMPT_SEEN = "prompt_seen",
+  TYPED = "typed",
+  ALREADY_RUNNING = "already_running",
+  TYPED_ELSEWHERE = "typed_elsewhere",
+  FAILED = "failed",
+}
+local S = M.PANE_STATE
+
+function M.is_final_pane_state(state_name)
+  return state_name == S.TYPED or state_name == S.ALREADY_RUNNING
+    or state_name == S.TYPED_ELSEWHERE or state_name == S.FAILED
+end
+
+-- The next state of a pane in a restore, given what one look at it found.
+-- `pane` is { state, prompt_line }. `look` is:
+--   typed_elsewhere  restore.json marks the pane typed by another watcher
+--   pane_exists      the pane is on the server
+--   agent_running    its foreground program is the recorded agent
+--   at_shell         its foreground is the shell Rex started
+--   shell            that shell's name
+--   editor_ready     the shell's line editor is reading keys
+--   prompt_line      the last line of its screen
+-- Returns the new { state, prompt_line, why }, and true when the resume
+-- command is to be typed now.
+function M.next_pane_state(pane, look)
+  local function to(state_name, extra)
+    local next_pane = { state = state_name }
+    for k, v in pairs(extra or {}) do next_pane[k] = v end
+    return next_pane
+  end
+  if M.is_final_pane_state(pane.state) then return pane, false end
+  if look.typed_elsewhere then return to(S.TYPED_ELSEWHERE), false end
+  if not look.pane_exists then return to(S.WAITING), false end
+  if look.agent_running then return to(S.ALREADY_RUNNING), false end
+  if not look.at_shell then return to(S.WAITING), false end
+  if not M.TYPEABLE_SHELLS[look.shell] then
+    return to(S.FAILED, { why = "its shell " .. tostring(look.shell) .. " isn't zsh, bash or fish" }), false
+  end
+  local line = look.editor_ready and look.prompt_line or nil
+  if not line or line == "" then return to(S.WAITING), false end
+  if pane.state == S.PROMPT_SEEN and pane.prompt_line == line then return to(S.TYPED), true end
+  return to(S.PROMPT_SEEN, { prompt_line = line }), false
+end
+
+-- A restore as a whole (restore.json's `state`):
+--
+--   pending ──every pane final, or the window ends──▶ finished
+--
+-- A finished restore is never run again, even by a watcher started later in
+-- the window (a config reload), so failures aren't retried or reported twice.
+M.RESTORE_STATE = { PENDING = "pending", FINISHED = "finished" }
+
+-- Whether a watcher on server `instance_id` should run `restore` at time `now`,
+-- and if not, why. A restore.json from before `state` existed counts as pending.
+function M.should_run_restore(restore, instance_id, now, deadline)
+  if type(restore) ~= "table" then return false, "nothing to restore" end
+  if restore.for_instance ~= instance_id then return false, "it is for another server" end
+  if (restore.state or M.RESTORE_STATE.PENDING) ~= M.RESTORE_STATE.PENDING then return false, "it finished" end
+  if now > deadline then return false, "the restore window has ended" end
+  return true
+end
+
+-- What a sweep found in a pane:
+--   agent               an agent whose conversation is known: recorded
+--   agent_unidentified  an agent whose conversation can't be told now: the
+--                       earlier record is kept
+--   no_agent            something else runs: counts toward forgetting
+--   unreadable          the pane's process couldn't be read: nothing changes
+M.FINDING = {
+  AGENT = "agent",
+  AGENT_UNIDENTIFIED = "agent_unidentified",
+  NO_AGENT = "no_agent",
+  UNREADABLE = "unreadable",
+}
+
+M.AGENTS = { claude = true, codex = true }
+
+function M.classify_finding(process_readable, program, identified)
+  if not process_readable then return M.FINDING.UNREADABLE end
+  if not M.AGENTS[program] then return M.FINDING.NO_AGENT end
+  if identified then return M.FINDING.AGENT end
+  return M.FINDING.AGENT_UNIDENTIFIED
+end
+
 -- The panes to type into after a restart, sorted by block ID, with one pane per
 -- conversation: { { block_id, entry }, ... }. `previous_state` is what the last
 -- server left.

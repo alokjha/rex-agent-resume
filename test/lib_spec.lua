@@ -140,4 +140,65 @@ return function(t, lib)
     eq(plan[1].block_id, "b1")
     eq(plan[2].block_id, "b3")
   end)
+
+  t("next_pane_state: a steady prompt is typed once", function(eq)
+    local S = lib.PANE_STATE
+    local ready = { pane_exists = true, at_shell = true, shell = "zsh", editor_ready = true, prompt_line = "~ ❯" }
+    local pane, type_now = lib.next_pane_state({ state = S.WAITING }, ready)
+    eq(pane.state, S.PROMPT_SEEN)
+    eq(type_now, false)
+    pane, type_now = lib.next_pane_state(pane, ready)       -- same line a second later
+    eq(pane.state, S.TYPED)
+    eq(type_now, true)
+    local again
+    pane, again = lib.next_pane_state(pane, ready)          -- final: stays typed, never again
+    eq(pane.state, S.TYPED)
+    eq(again, false)
+  end)
+
+  t("next_pane_state: a changing or missing prompt waits", function(eq)
+    local S = lib.PANE_STATE
+    local seen = { state = S.PROMPT_SEEN, prompt_line = "~ ❯" }
+    local base = { pane_exists = true, at_shell = true, shell = "zsh", editor_ready = true }
+    base.prompt_line = "~ ❯ cl"                             -- someone is typing
+    local pane, type_now = lib.next_pane_state(seen, base)
+    eq(pane.state, S.PROMPT_SEEN)
+    eq(pane.prompt_line, "~ ❯ cl")
+    eq(type_now, false)
+    eq(lib.next_pane_state(seen, { pane_exists = true, at_shell = true, shell = "zsh", editor_ready = false,
+                                    prompt_line = "~ ❯" }).state, S.WAITING)  -- editor not reading keys
+    eq(lib.next_pane_state(seen, { pane_exists = true, at_shell = false }).state, S.WAITING)
+    eq(lib.next_pane_state(seen, { pane_exists = false }).state, S.WAITING)
+  end)
+
+  t("next_pane_state: final states", function(eq)
+    local S = lib.PANE_STATE
+    local waiting = { state = S.WAITING }
+    eq(lib.next_pane_state(waiting, { pane_exists = true, agent_running = true }).state, S.ALREADY_RUNNING)
+    eq(lib.next_pane_state(waiting, { typed_elsewhere = true, pane_exists = true }).state, S.TYPED_ELSEWHERE)
+    local failed = lib.next_pane_state(waiting, { pane_exists = true, at_shell = true, shell = "sh" })
+    eq(failed.state, S.FAILED)
+    eq(type(failed.why), "string")
+    eq(lib.is_final_pane_state(S.FAILED), true)
+    eq(lib.is_final_pane_state(S.PROMPT_SEEN), false)
+  end)
+
+  t("should_run_restore: a finished restore never runs again", function(eq)
+    local R = lib.RESTORE_STATE
+    eq(lib.should_run_restore({ for_instance = "i2", state = R.PENDING }, "i2", 100, 200), true)
+    eq(lib.should_run_restore({ for_instance = "i2" }, "i2", 100, 200), true)  -- written before `state` existed
+    eq(lib.should_run_restore({ for_instance = "i2", state = R.FINISHED }, "i2", 100, 200), false)
+    eq(lib.should_run_restore({ for_instance = "i1", state = R.PENDING }, "i2", 100, 200), false)
+    eq(lib.should_run_restore({ for_instance = "i2", state = R.PENDING }, "i2", 300, 200), false)
+    eq(lib.should_run_restore(nil, "i2", 100, 200), false)
+  end)
+
+  t("classify_finding", function(eq)
+    local F = lib.FINDING
+    eq(lib.classify_finding(true, "claude", true), F.AGENT)
+    eq(lib.classify_finding(true, "codex", false), F.AGENT_UNIDENTIFIED)
+    eq(lib.classify_finding(true, "zsh", false), F.NO_AGENT)
+    eq(lib.classify_finding(true, nil, false), F.NO_AGENT)
+    eq(lib.classify_finding(false, "claude", false), F.UNREADABLE)
+  end)
 end
