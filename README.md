@@ -64,6 +64,7 @@ No prompts, transcripts or environment are read or kept, apart from the Claude s
 - Only Claude Code and Codex. Only zsh, bash and fish panes are typed into.
 - A pane in zsh vi command mode (not insert mode) may not take the line correctly.
 - A folder holding a backslash isn't restored, as fish reads single-quoted backslashes differently.
+- Two Codex panes in the same folder are told apart by the thread name in their titles. If both are unnamed or share a name, the pane keeps the last ID it was sure of, or isn't recorded. Give such threads distinct names with Codex's `/rename`. A Codex `SessionStart` hook can't fix this: Codex's shared background service runs hooks, with the environment of whichever pane started it, so a hook can't tell which pane it's for.
 - `CLAUDE_CONFIG_DIR` and `CODEX_HOME` are read from the Rex server's environment, not each agent's.
 - Codex's database and session files are Codex's own formats and may change; each has a fallback, and the log says when one is used.
 - `rex config check` runs `init.lua`, so it starts a watcher too. That one replaces the running watcher, which is harmless.
