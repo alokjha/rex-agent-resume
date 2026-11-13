@@ -21,6 +21,10 @@ Developed and tested on macOS 27 with Rex 0.1.0 previews (up to preview.18), Cla
 
 ## Install
 
+Rex has no plugin manager: a tool like this is loaded by a line in your `init.lua`. There are two ways to add it.
+
+### With the install script
+
 ```sh
 git clone https://github.com/alokjha/rex-agent-resume ~/.config/rex/rex-agent-resume
 ~/.config/rex/rex-agent-resume/install.sh --key shift+cmd+r
@@ -37,6 +41,31 @@ git clone https://github.com/alokjha/rex-agent-resume ~/.config/rex/rex-agent-re
 5. reloads Rex's config, which starts the watcher, and reports how many agent panes the watcher has recorded.
 
 Keep the clone where you put it: `init.lua` loads the tool from there.
+
+### By hand
+
+Clone the repository into Rex's config folder, beside your `init.lua`:
+
+```sh
+git clone https://github.com/alokjha/rex-agent-resume ~/.config/rex/rex-agent-resume
+```
+
+Add these lines to `~/.config/rex/init.lua` (the key is optional):
+
+```lua
+require("rex-agent-resume")
+rex.bind("shift+cmd+r", "resume_agents")
+```
+
+Then run `rex config check` and `rex config reload`. Rex's `require` finds Lua files beside `init.lua`, so this loads the repository's own `init.lua`, which loads the tool.
+
+If you keep the clone somewhere else, load it by its path instead:
+
+```lua
+dofile("/path/to/rex-agent-resume/rex-agent-resume.lua")
+```
+
+This also suits a dotfiles setup (chezmoi, Nix home-manager, a symlinked `~/.config/rex`): manage the clone and one of these lines like the rest of your config.
 
 **Run only one tool that resumes agents after a restart.** Two would type the resume command twice into each pane. If you already use one, turn off its agent restore or remove it before installing this.
 
@@ -59,8 +88,8 @@ Then quit Rex completely and open it again. Within a few seconds of each pane's 
 
 ### Update and remove
 
-- **Update:** `~/.config/rex/rex-agent-resume/install.sh --update` pulls the latest version and reloads Rex's config.
-- **Remove:** `~/.config/rex/rex-agent-resume/install.sh --uninstall`. It takes the block out of `init.lua` (with a backup) and stops the watcher. Its records in `~/.local/state/rex-agent-resume/` are left for you to delete.
+- **Update:** `~/.config/rex/rex-agent-resume/install.sh --update` pulls the latest version and reloads Rex's config. Installed by hand: `git -C ~/.config/rex/rex-agent-resume pull`, then `rex config reload`.
+- **Remove:** `~/.config/rex/rex-agent-resume/install.sh --uninstall`. It takes the block out of `init.lua` (with a backup) and stops the watcher. Installed by hand: delete the lines you added, run `rex config reload`, and stop the watcher with `kill $(cat ~/.local/state/rex-agent-resume/watcher.pid)`. Its records in `~/.local/state/rex-agent-resume/` are left for you to delete.
 
 ## Resume by hand
 
@@ -139,7 +168,8 @@ Start with `watcher.log`. Each pane resumed has a `resumed …` line; anything t
 
 | File | Does |
 | --- | --- |
-| `rex-agent-resume.lua` | Loaded by `init.lua`: starts the watcher and adds the Resume Agents action. |
+| `init.lua` | Not a Rex config: lets `require("rex-agent-resume")` load the tool when the repository sits beside your `init.lua`. |
+| `rex-agent-resume.lua` | Loaded by your `init.lua`: starts the watcher and adds the Resume Agents action. |
 | `watcher.lua` | The watcher, plus `mode=resume` and `mode=status`. Everything that talks to Rex. |
 | `lib.lua` | The logic that doesn't need Rex: parsing, choosing a Codex thread, when to forget, the restore states. The tests cover it. |
 | `install.sh` | Adds the tool to `init.lua`, or `--uninstall` takes it out. |
