@@ -39,7 +39,7 @@ lua_string() { printf '"%s"' "$(printf '%s' "$1" | sed 's/\\/\\\\/g; s/"/\\"/g')
 # A key with its modifiers in a fixed order, so "cmd+shift+r" and
 # "shift+cmd+r" compare equal.
 normalize_key() {
-  printf '%s' "$1" | tr 'A-Z' 'a-z' | awk -F+ '{
+  printf '%s' "$1" | tr '[:upper:]' '[:lower:]' | awk -F+ '{
     n = split($0, parts, "+"); key = parts[n]; mods = ""
     split("ctrl alt shift cmd", order, " ")
     for (i = 1; i <= 4; i++) for (j = 1; j < n; j++) {
@@ -85,6 +85,8 @@ stop_watcher() {
 # script.lua`), whatever they are. Tools that resume agents after a restart run
 # this way; two of them would type the resume command twice into each pane.
 warn_about_other_rex_scripts() {
+  # ps rather than pgrep: pgrep prints whole command lines differently on macOS and Linux.
+  # shellcheck disable=SC2009
   others=$(ps -axww -o args= 2>/dev/null \
     | grep -E '(^|/)rex( [^ ]+)* do ' \
     | grep -vF -e "$here/watcher.lua" -e "$here_real/watcher.lua" \
@@ -111,7 +113,7 @@ verify() {
     return 1
   fi
   sleep 3
-  agents=$("$rex" --autostart=false do --all "$here/watcher.lua" mode=status "state=$state" 2>/dev/null \
+  agents=$("$rex" --autostart=false "do" --all "$here/watcher.lua" mode=status "state=$state" 2>/dev/null \
     | grep -cE '^  .* (claude|codex) ' || true)
   echo "The watcher is running (pid $pid) and has recorded $agents agent pane(s)."
   echo "See them with: rex do --all $here/watcher.lua mode=status"
@@ -194,8 +196,10 @@ if [ -f "$config" ]; then
 else
   : > "$config.tmp"
 fi
+needs_blank_line=
+if [ -s "$config.tmp" ]; then needs_blank_line=1; fi
 {
-  if [ -s "$config.tmp" ]; then echo; fi
+  if [ -n "$needs_blank_line" ]; then echo; fi
   echo "$begin"
   echo "-- Resumes Claude Code and Codex in their panes after Rex restarts."
   echo "-- https://github.com/alokjha/rex-agent-resume"
