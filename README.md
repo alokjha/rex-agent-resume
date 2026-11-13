@@ -81,9 +81,19 @@ lua5.1 test/run.lua       # or: rex do test/run.lua
 rex do --all watcher.lua state=/tmp/rar-test restore_test=1 notify=0
 ```
 
-## Credits
+## History and credits
 
-The ideas of finding Codex threads in its state database and checking for a Claude transcript come from [thomasschafer/dotfiles#11](https://github.com/thomasschafer/dotfiles/pull/11); forgetting an agent only after two missed checks, and waiting for a steady prompt, from [sshtab](https://github.com/luongnv89/rex-extensions/tree/main/sshtab). The code here is written from scratch.
+This grew out of a resume script written for one person's own Rex setup and tested over several real restarts. Its approach is still the core of this one:
+
+- the conversation each pane runs, from Claude's per-process session file, and for Codex from `codex resume <UUID>` or the thread name in the pane's title looked up in `session_index.jsonl` (which covers plain `codex` and `codex resume <name>`);
+- a record keyed by Rex's pane IDs, which survive restarts;
+- resuming once per new server instance, only into panes back at a shell prompt, never twice into one pane;
+- one watcher at a time, the newest replacing an older or stuck one, and the Resume Agents action.
+
+Two other projects solving the same problem had ideas worth adding, reimplemented here:
+
+- [thomasschafer/dotfiles#11](https://github.com/thomasschafer/dotfiles/pull/11): finding a Codex TUI's thread in Codex's state database, and checking a Claude transcript exists before recording its ID;
+- [sshtab](https://github.com/luongnv89/rex-extensions/tree/main/sshtab): forgetting an agent only after two missed checks, so quitting Rex doesn't erase them, and waiting for a steady prompt before typing.
 
 ## License
 
