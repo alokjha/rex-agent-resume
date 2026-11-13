@@ -1,6 +1,7 @@
--- rex-agent-resume.lua: loaded by init.lua with dofile. Starts watcher.lua in
--- the background each time the Rex server loads its config, and adds the
--- resume_agents action. https://github.com/alokjha/rex-agent-resume
+-- rex-agent-resume.lua: loaded from your Rex init.lua, by require("rex-agent-resume")
+-- (through this repository's init.lua) or by dofile with its path. Starts
+-- watcher.lua in the background each time the Rex server loads its config, and
+-- adds the resume_agents action. https://github.com/alokjha/rex-agent-resume
 
 local MODULE_DIR = (debug.getinfo(1, "S").source:gsub("^@", "")):match("^(.*)/[^/]*$") or "."
 local HOME = os.getenv("HOME") or ""

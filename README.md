@@ -35,7 +35,7 @@ git clone https://github.com/alokjha/rex-agent-resume ~/.config/rex/rex-agent-re
 `install.sh`:
 
 1. backs up your `init.lua` (`$REX_CONFIG`, else `$XDG_CONFIG_HOME/rex/init.lua`, else `~/.config/rex/init.lua`) next to it, as `init.lua.bak-rex-agent-resume-<date>-<pid>`;
-2. adds a block marked `-- >>> rex-agent-resume >>>` that loads `rex-agent-resume.lua` from the clone, plus the key binding if you passed one (run it again to change or drop the key: it rewrites its own block and leaves the rest of the file alone);
+2. adds a block marked `-- >>> rex-agent-resume >>>` that loads the tool, plus the key binding if you passed one. A clone beside `init.lua` is loaded with `require("rex-agent-resume")`, as when [installing by hand](#by-hand); one elsewhere by its path. Run it again to change or drop the key: it rewrites its own block and leaves the rest of the file alone;
 3. checks the result with `rex config check`, and puts the old file back if the check fails;
 4. names any other background Rex scripts that are running, since another tool that resumes agents would run as one;
 5. reloads Rex's config, which starts the watcher, and reports how many agent panes the watcher has recorded.
@@ -93,7 +93,13 @@ Then quit Rex completely and open it again. Within a few seconds of each pane's 
 
 ## Resume by hand
 
-**Resume Agents** (the key you chose, the command palette, or `rex do --all ~/.config/rex/rex-agent-resume/watcher.lua mode=resume`) types the last restart's conversations into any recorded pane that is at a shell prompt and isn't running its agent. Use it when a pane wasn't ready in time, or after you quit an agent by mistake.
+**Resume Agents** (the key you chose, the command palette, or `rex do --all ~/.config/rex/rex-agent-resume/watcher.lua mode=resume`) types the conversations from the last restart into any of their panes that is at a shell prompt and isn't running its agent, then prints what it did:
+
+```
+resumed 1, already running 8, not resumed 0
+```
+
+Use it when a pane wasn't ready within the 120 seconds after a restart. It only knows the conversations that ran when Rex last restarted, so it can't bring back one started since.
 
 ## How it works
 
@@ -150,7 +156,7 @@ Start with `watcher.log`. Each pane resumed has a `resumed …` line; anything t
 | Codex stopped at "Update available" or a folder-trust question | Those are Codex's own prompts. Answer them; the conversation resumes after. |
 | `command not found: claude` (or `codex`) | The agent isn't on the `PATH` of a new shell. Fix your shell's `PATH`. |
 | A Codex pane is missing from `mode=status` | Another Codex runs in the same folder and their names don't tell them apart. Give the conversations distinct names with Codex's `/rename`. |
-| Nothing is recorded at all | Check that `init.lua` has the `rex-agent-resume` block, that `rex config check` passes, and that a watcher runs: `cat ~/.local/state/rex-agent-resume/watcher.pid`. |
+| Nothing is recorded at all | Check that `init.lua` loads the tool (the install script's block, or your `require` or `dofile` line), that `rex config check` passes, and that a watcher runs: `ps -p $(cat ~/.local/state/rex-agent-resume/watcher.pid)`. |
 
 ## Limits
 

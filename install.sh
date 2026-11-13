@@ -11,6 +11,7 @@
 set -eu
 
 here=$(cd "$(dirname "$0")" && pwd)
+here_real=$(cd "$here" && pwd -P) # the same folder with symlinks resolved, as a dotfiles setup may link it
 config=${REX_CONFIG:-${XDG_CONFIG_HOME:-$HOME/.config}/rex/init.lua}
 state=${XDG_STATE_HOME:-$HOME/.local/state}/rex-agent-resume
 begin='-- >>> rex-agent-resume >>>'
@@ -70,7 +71,7 @@ strip_block() { awk -v b="$begin" -v e="$end" '$0==b{skip=1} !skip{print} $0==e{
 
 watcher_pid() {
   pid=$(cat "$state/watcher.pid" 2>/dev/null || true)
-  if [ -n "$pid" ] && ps -ww -o args= -p "$pid" 2>/dev/null | grep -q "$here/watcher.lua"; then
+  if [ -n "$pid" ] && ps -ww -o args= -p "$pid" 2>/dev/null | grep -qF -e "$here/watcher.lua" -e "$here_real/watcher.lua"; then
     echo "$pid"
   fi
 }
@@ -86,7 +87,7 @@ stop_watcher() {
 warn_about_other_rex_scripts() {
   others=$(ps -axww -o args= 2>/dev/null \
     | grep -E '(^|/)rex( [^ ]+)* do ' \
-    | grep -vF -- "$here/watcher.lua" \
+    | grep -vF -e "$here/watcher.lua" -e "$here_real/watcher.lua" \
     | grep -oE '[^ ]+\.lua' | sort -u || true)
   [ -n "$others" ] || return 0
   note "other background Rex scripts are running:"
@@ -174,6 +175,15 @@ if [ -n "$key" ] && server_running; then
   fi
 fi
 
+# A clone beside init.lua, as <config folder>/rex-agent-resume, is loaded with
+# Rex's own require, as when installing by hand; one elsewhere by its path.
+beside_config=$(cd "$(dirname "$config")/rex-agent-resume" 2>/dev/null && pwd -P || true)
+if [ "$beside_config" = "$here_real" ]; then
+  load_line='require("rex-agent-resume")'
+else
+  load_line="dofile($(lua_string "$here/rex-agent-resume.lua"))"
+fi
+
 was_installed=
 if [ -f "$config" ] && grep -qxF -- "$begin" "$config"; then was_installed=1; fi
 
@@ -189,7 +199,7 @@ fi
   echo "$begin"
   echo "-- Resumes Claude Code and Codex in their panes after Rex restarts."
   echo "-- https://github.com/alokjha/rex-agent-resume"
-  echo "dofile($(lua_string "$here/rex-agent-resume.lua"))"
+  echo "$load_line"
   if [ -n "$key" ]; then echo "rex.bind($(lua_string "$key"), \"resume_agents\")"; fi
   echo "$end"
 } >> "$config.tmp"

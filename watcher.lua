@@ -6,8 +6,11 @@
 --                                           panes that are back at a shell prompt
 --   rex do --all watcher.lua mode=status    print what is recorded
 --
--- Options: state=DIR (default $XDG_STATE_HOME/rex-agent-resume), notify=0 to turn
--- off macOS notifications about agents that couldn't be resumed.
+-- Options:
+--   state=DIR       where the records live (default $XDG_STATE_HOME/rex-agent-resume)
+--   notify=0        no macOS notification about agents that couldn't be resumed
+--   restore_test=1  count the 120-second restore window from now rather than from
+--                   the server's start, to test a restore without restarting Rex
 
 local args = rex.args or {}
 local SCRIPT_DIR = (debug.getinfo(1, "S").source:gsub("^@", "")):match("^(.*)/[^/]*$") or "."
@@ -330,23 +333,29 @@ local function resume_recorded_agents(restore, deadline, on_done, manual)
   local function describe(pane) return pane.entry.agent .. " in " .. tostring(pane.entry.session) end
 
   local function finish()
-    local failures = {}
+    local failures, counts = {}, {}
     restore.failed = {}
     for block_id, pane in pairs(panes) do
       if not lib.is_final_pane_state(pane.state) then
         pane.state, pane.why = S.FAILED, "its pane wasn't at a shell prompt in time"
       end
+      counts[pane.state] = (counts[pane.state] or 0) + 1
       if pane.state == S.FAILED then
         failures[#failures + 1] = describe(pane) .. ": " .. pane.why
         restore.failed[block_id] = pane.why
       end
     end
-    if not manual then
+    if manual then
+      -- The action shows its output; a notification for each busy pane would be noise.
+      print(string.format("resumed %d, already running %d, not resumed %d",
+        counts[S.TYPED] or 0, counts[S.ALREADY_RUNNING] or 0, #failures))
+      for _, failure in ipairs(failures) do print("  " .. failure) end
+    else
       restore.state = lib.RESTORE_STATE.FINISHED
       write_json(RESTORE_FILE, restore)
-    end
-    if #failures > 0 then
-      notify("Couldn't resume " .. #failures .. " agent(s): " .. table.concat(failures, "; "))
+      if #failures > 0 then
+        notify("Couldn't resume " .. #failures .. " agent(s): " .. table.concat(failures, "; "))
+      end
     end
     if on_done then on_done() end
   end
@@ -505,10 +514,7 @@ local function run_manual_resume()
   end
   -- Typed again only where the agent isn't running and the pane is at a prompt.
   restore.typed = {}
-  resume_recorded_agents(restore, os.time() + 10, function()
-    print("done; see the log for what was resumed")
-    rex.stop(0)
-  end, true)
+  resume_recorded_agents(restore, os.time() + 10, function() rex.stop(0) end, true)
 end
 
 local function print_status()
