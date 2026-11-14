@@ -1,12 +1,15 @@
--- Runs test/lib_spec.lua. Works with a plain Lua 5.1+ (lua test/run.lua, from
+-- Runs the specs in test/. Works with a plain Lua 5.1+ (lua test/run.lua, from
 -- the repo's folder) and inside Rex (rex do test/run.lua).
 
 local src = debug.getinfo(1, "S").source:gsub("^@", "")
 local root = (src:match("^(.*)/test/[^/]*$") or ".")
 local lib = dofile(root .. "/lib.lua")
-local spec = dofile(root .. "/test/lib_spec.lua")
+local agents = dofile(root .. "/agents/init.lua")(lib)
+local specs = { "lib_spec", "agents_spec" }
 
-local passed, failed = 0, 0
+-- Counts in a table, not locals: in Rex's Lua, once a pcall inside a test has
+-- caught an error, a closure's later assignments to outer locals are lost.
+local count = { passed = 0, failed = 0 }
 local function t(name, fn)
   local problems = {}
   local function eq(got, want)
@@ -17,16 +20,16 @@ local function t(name, fn)
   local ok, err = pcall(fn, eq)
   if not ok then problems[#problems + 1] = "error: " .. tostring(err) end
   if #problems == 0 then
-    passed = passed + 1
+    count.passed = count.passed + 1
   else
-    failed = failed + 1
+    count.failed = count.failed + 1
     print("FAIL " .. name)
     for _, p in ipairs(problems) do print("     " .. p) end
   end
 end
 
-spec(t, lib)
-print(string.format("%d passed, %d failed", passed, failed))
-if failed > 0 then
+for _, name in ipairs(specs) do dofile(root .. "/test/" .. name .. ".lua")(t, lib, agents) end
+print(string.format("%d passed, %d failed", count.passed, count.failed))
+if count.failed > 0 then
   if rex then rex.stop(1) else os.exit(1) end
 end

@@ -1,5 +1,6 @@
 -- lib.lua: the parts of rex-agent-resume that don't talk to Rex, so they can be
 -- tested with a plain Lua interpreter. Written for Lua 5.1, which Rex embeds.
+-- Nothing here knows any agent: each is a file in agents/.
 
 local M = {}
 
@@ -23,13 +24,50 @@ function M.shell_quote(text)
   return "'" .. text:gsub("'", "'\\''") .. "'"
 end
 
+-- Agents -------------------------------------------------------------------
+--
+-- The registry of the agents in agents/ (see agents/init.lua for what an agent
+-- is): { list, by_name, by_program }. Refuses an agent that is malformed, has
+-- a field the contract doesn't know (a misspelled one, say), or
+-- clashes with another, so a mistake shows when the watcher starts.
+-- An agent's fields, all required (see agents/init.lua).
+M.AGENT_FIELDS = { name = true, programs = true, is_valid_id = true, resume_command = true, detect = true }
+
+function M.new_registry(agents)
+  local registry = { list = {}, by_name = {}, by_program = {} }
+  for i, agent in ipairs(agents) do
+    local label = "agent " .. i
+    if type(agent) ~= "table" then error(label .. " isn't a table") end
+    if type(agent.name) ~= "string" or not agent.name:find("^[%w_%-]+$") then
+      error(label .. " needs a name of letters, digits, _ or -")
+    end
+    label = "agent " .. agent.name
+    for field in pairs(agent) do
+      if not M.AGENT_FIELDS[field] then error(label .. " has an unknown field " .. tostring(field)) end
+    end
+    for _, field in ipairs({ "is_valid_id", "resume_command", "detect" }) do
+      if type(agent[field]) ~= "function" then error(label .. " needs a function " .. field) end
+    end
+    if type(agent.programs) ~= "table" or #agent.programs == 0 then error(label .. " needs programs") end
+    if registry.by_name[agent.name] then error(label .. " is there twice") end
+    for _, program in ipairs(agent.programs) do
+      local other = registry.by_program[program]
+      if other then error(label .. " and agent " .. other.name .. " both claim " .. program) end
+      registry.by_program[program] = agent
+    end
+    registry.by_name[agent.name] = agent
+    registry.list[#registry.list + 1] = agent
+  end
+  return registry
+end
+
 -- The command that resumes an entry's conversation in its folder, or nil and why.
-function M.resume_command(entry)
-  if type(entry) ~= "table" or not M.is_uuid(entry.id) then return nil, "its session id isn't a UUID" end
-  local command
-  if entry.agent == "claude" then command = "claude --resume " .. entry.id
-  elseif entry.agent == "codex" then command = "codex resume " .. entry.id
-  else return nil, "unknown agent " .. tostring(entry.agent) end
+function M.resume_command(entry, registry)
+  if type(entry) ~= "table" then return nil, "it isn't a record" end
+  local agent = registry.by_name[entry.agent]
+  if not agent then return nil, "unknown agent " .. tostring(entry.agent) end
+  if not agent.is_valid_id(entry.id) then return nil, "its conversation ID isn't one of " .. agent.name .. "'s" end
+  local command = agent.resume_command(entry.id)
   if entry.cwd then
     local quoted_folder = M.shell_quote(entry.cwd)
     if not quoted_folder then return nil, "its folder has a backslash" end
@@ -111,67 +149,6 @@ function M.parse_ps_line(line)
   return age_seconds, argv
 end
 
--- The conversation a codex command line names: `codex [options] resume X`.
--- Returns { uuid = X } or { name = X }, or nil.
-function M.codex_resume_target(argv)
-  if type(argv) ~= "table" then return nil end
-  for i = 2, #argv do
-    if argv[i] == "resume" then
-      local target = argv[i + 1]
-      if not target or target:sub(1, 1) == "-" then return nil end
-      if M.is_uuid(target) then return { uuid = target } end
-      return { name = table.concat(argv, " ", i + 1) }
-    elseif argv[i]:sub(1, 1) ~= "-" and argv[i - 1]:sub(1, 1) ~= "-" then
-      return nil -- another subcommand, or a prompt (a word after an option is its value)
-    end
-  end
-  return nil
-end
-
--- The thread name Codex shows in its title, "NAME | FOLDER", or the whole title.
-function M.codex_thread_name_from_title(title)
-  if type(title) ~= "string" or title == "" then return nil end
-  return title:match("^(.-) | [^|]*$") or title
-end
-
--- Chooses a Codex TUI's thread from `threads`: Codex's threads in its folder
--- that were written since it started (`written_since_start`) or that its
--- command line names (`resume_target`), newest first. `folder_is_shared` says
--- another Codex runs in the same folder. Returns the thread ID, or nil and why.
-function M.choose_codex_thread(threads, title, resume_target, folder_is_shared)
-  if type(threads) ~= "table" or #threads == 0 then return nil end
-  local title_name = M.codex_thread_name_from_title(title)
-  local named_in_title = {}
-  for _, thread in ipairs(threads) do
-    if title_name and thread.name == title_name then named_in_title[#named_in_title + 1] = thread.id end
-  end
-  if #named_in_title == 1 then return named_in_title[1] end
-  if resume_target and not folder_is_shared then
-    local newest = threads[1]
-    for _, thread in ipairs(threads) do
-      local is_target = (resume_target.uuid and thread.id == resume_target.uuid)
-        or (resume_target.name and thread.name == resume_target.name)
-      -- Unless a newer thread was written since, the one it resumed is it.
-      if is_target and (newest.id == thread.id or not newest.written_since_start) then return thread.id end
-    end
-  end
-  if not folder_is_shared then return threads[1].id end
-  return nil, "another Codex runs in the same folder and its title doesn't name one thread"
-end
-
--- Of Codex's session_index.jsonl text, the newest ID with this thread name.
-function M.codex_id_from_index(index_text, thread_name, decode_json)
-  if not index_text or not thread_name then return nil end
-  local found
-  for line in index_text:gmatch("[^\n]+") do
-    local ok, indexed = pcall(decode_json, line)
-    if ok and type(indexed) == "table" and indexed.thread_name == thread_name and M.is_uuid(indexed.id) then
-      found = indexed.id
-    end
-  end
-  return found
-end
-
 -- The last non-blank line of a pane's screen: its prompt line, once the prompt
 -- is drawn. Watching it stay the same shows nothing is being typed.
 function M.last_screen_line(screen_text)
@@ -189,14 +166,14 @@ function M.new_state(instance_id)
   return { version = M.STATE_VERSION, instance_id = instance_id, panes = {} }
 end
 
--- A state read from disk, with anything malformed dropped.
-function M.sanitize_state(raw)
+-- A state read from disk, with anything malformed or of an unknown agent dropped.
+function M.sanitize_state(raw, registry)
   if type(raw) ~= "table" or raw.version ~= M.STATE_VERSION or type(raw.panes) ~= "table" then
     return M.new_state(nil)
   end
   local panes = {}
   for block_id, entry in pairs(raw.panes) do
-    if type(block_id) == "string" and type(entry) == "table" and M.resume_command(entry) then
+    if type(block_id) == "string" and type(entry) == "table" and M.resume_command(entry, registry) then
       panes[block_id] = entry
     end
   end
@@ -261,7 +238,7 @@ end
 -- `pane` is { state, prompt_line }. `look` is:
 --   typed_elsewhere  restore.json marks the pane typed by another watcher
 --   pane_exists      the pane is on the server
---   agent_running    its foreground program is the recorded agent
+--   agent_running    its foreground program is the recorded agent's
 --   at_shell         its foreground is the shell Rex started
 --   shell            that shell's name
 --   editor_ready     the shell's line editor is reading keys
@@ -319,11 +296,10 @@ M.FINDING = {
   UNREADABLE = "unreadable",
 }
 
-M.AGENTS = { claude = true, codex = true }
-
-function M.classify_finding(process_readable, program, identified)
+-- `agent` is the registered agent of the pane's foreground program, or nil.
+function M.classify_finding(process_readable, agent, identified)
   if not process_readable then return M.FINDING.UNREADABLE end
-  if not M.AGENTS[program] then return M.FINDING.NO_AGENT end
+  if not agent then return M.FINDING.NO_AGENT end
   if identified then return M.FINDING.AGENT end
   return M.FINDING.AGENT_UNIDENTIFIED
 end

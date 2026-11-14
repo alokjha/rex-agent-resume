@@ -44,7 +44,7 @@ rex.exec.start({ "/bin/sh", "-c", [[
 rex.action{
   name = "resume_agents",
   title = "Resume Agents",
-  description = "Resume the Claude Code and Codex conversations the last Rex server ran, in panes that are back at a shell prompt.",
+  description = "Resume the agent conversations (Claude Code, Codex, ...) the last Rex server ran, in panes that are back at a shell prompt.",
   run = function()
     local result = rex.exec({ REX_BINARY, "--autostart=false", "do", "--all", WATCHER_SCRIPT,
       "mode=resume", "state=" .. STATE_DIR }, { timeout = 30 })

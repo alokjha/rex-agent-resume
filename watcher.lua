@@ -1,5 +1,6 @@
--- watcher.lua: records which Claude Code or Codex conversation runs in which Rex
--- pane, and types each one back into its pane after the Rex server restarts.
+-- watcher.lua: records which agent conversation (Claude Code, Codex, or any
+-- other agent in agents/) runs in which Rex pane, and types each one back into
+-- its pane after the Rex server restarts.
 --
 --   rex do --all watcher.lua                the watcher (rex-agent-resume.lua starts it)
 --   rex do --all watcher.lua mode=resume    resume the last server's agents now, in
@@ -15,6 +16,7 @@
 local args = rex.args or {}
 local SCRIPT_DIR = (debug.getinfo(1, "S").source:gsub("^@", "")):match("^(.*)/[^/]*$") or "."
 local lib = dofile(SCRIPT_DIR .. "/lib.lua")
+local agents = dofile(SCRIPT_DIR .. "/agents/init.lua")(lib)
 
 local TERMINAL = "com.superlogical.terminal" -- the Rex block type of a terminal pane
 local HOME = assert(os.getenv("HOME"), "HOME isn't set")
@@ -22,8 +24,6 @@ local STATE_DIR = args.state or ((os.getenv("XDG_STATE_HOME") or (HOME .. "/.loc
 local STATE_FILE = STATE_DIR .. "/state.json"     -- this server's panes
 local RESTORE_FILE = STATE_DIR .. "/restore.json" -- the last server's panes, and which were typed
 local PID_FILE = STATE_DIR .. "/watcher.pid"
-local CLAUDE_DIR = os.getenv("CLAUDE_CONFIG_DIR") or (HOME .. "/.claude")
-local CODEX_DIR = os.getenv("CODEX_HOME") or (HOME .. "/.codex")
 local NOTIFY_ON_FAILURE = tostring(args.notify) ~= "0"
 local mode = args.mode or "watch"
 local my_pid -- this watcher's pid, once known
@@ -112,109 +112,23 @@ local function list_terminal_panes()
   return panes, complete
 end
 
--- Which conversation runs in a pane ----------------------------------------
+-- What an agent may use (see agents/init.lua) --------------------------------
 
-local claude_ids_with_transcript = {}
+local host = {
+  home = HOME,
+  getenv = os.getenv,
+  now = os.time,
+  read_file = read_file,
+  read_json = read_json,
+  decode_json = rex.json.decode,
+  exec = rex.exec,
+  warn = function(message) rex.log("warn", message) end,
+  terminal_call = terminal_call,
+}
 
--- The Claude conversation `foreground` (a Claude process) is on, or nil.
-local function detect_claude(foreground)
-  local session_file = read_json(CLAUDE_DIR .. "/sessions/" .. foreground.pid .. ".json")
-  if type(session_file) ~= "table" or not lib.is_uuid(session_file.sessionId) then return nil end
-  if session_file.pid and session_file.pid ~= foreground.pid then return nil end
-  local id = session_file.sessionId
-  -- A conversation gets a transcript with its first message; before that there
-  -- is nothing to resume.
-  if not claude_ids_with_transcript[id] then
-    local result = rex.exec({ "/bin/sh", "-c",
-      'for f in "$1"/projects/*/"$2".jsonl; do [ -e "$f" ] && exit 0; done; exit 1',
-      "sh", CLAUDE_DIR, id })
-    if not (result and result.ok) then return nil end
-    claude_ids_with_transcript[id] = true
-  end
-  return { agent = "claude", id = id, cwd = session_file.cwd or foreground.cwd }
-end
-
-local function sql_quote(text) return "'" .. tostring(text):gsub("'", "''") .. "'" end
-
-local warned_about_codex_db = false
-
--- Codex's newest state database, ~/.codex/state_N.sqlite. Its format belongs
--- to Codex and can change, so every use of it has a fallback.
-local function find_codex_db()
-  local result = rex.exec({ "/bin/sh", "-c", 'ls "$1"/state_*.sqlite 2>/dev/null', "sh", CODEX_DIR })
-  local newest_path, newest_version
-  for path in ((result and result.stdout) or ""):gmatch("[^\n]+") do
-    local version = tonumber(path:match("state_(%d+)%.sqlite$"))
-    if version and (not newest_version or version > newest_version) then
-      newest_path, newest_version = path, version
-    end
-  end
-  return newest_path
-end
-
--- Codex's threads in `folder` written since `started_ms`, or named by
--- `resume_target`, newest first; nil when the database can't be read.
-local function query_codex_threads(folder, started_ms, resume_target)
-  local db_path = find_codex_db()
-  if not db_path then return nil end
-  local also_named = ""
-  if resume_target and resume_target.uuid then also_named = " OR id = " .. sql_quote(resume_target.uuid) end
-  if resume_target and resume_target.name then also_named = " OR name = " .. sql_quote(resume_target.name) end
-  local updated_ms = "COALESCE(updated_at_ms, updated_at * 1000)"
-  local query = "SELECT id, COALESCE(name, '') AS name, " .. updated_ms .. " AS updated_ms FROM threads"
-    .. " WHERE archived = 0 AND cwd = " .. sql_quote(folder)
-    -- Codex's own review threads and the desktop app's aren't a terminal's.
-    .. " AND COALESCE(thread_source, 'user') = 'user'"
-    .. " AND COALESCE(originator, '') <> 'codex_work_desktop'"
-    .. " AND (" .. updated_ms .. " >= " .. string.format("%d", started_ms) .. also_named .. ")"
-    .. " ORDER BY updated_ms DESC LIMIT 20"
-  local result = rex.exec({ "sqlite3", "-readonly", "-json", db_path, query }, { timeout = 5 })
-  -- Codex's database is in WAL mode. A read-only reader can't create its -shm
-  -- file, so it fails while no Codex has the database open. Then there is no
-  -- -wal file either, and reading it as immutable sees everything.
-  if not (result and result.ok) and not read_file(db_path .. "-wal") then
-    local uri = "file:" .. db_path:gsub("[%%?# ]", function(c) return string.format("%%%02X", c:byte()) end)
-      .. "?immutable=1"
-    result = rex.exec({ "sqlite3", "-json", uri, query }, { timeout = 5 })
-  end
-  if not (result and result.ok) then
-    if not warned_about_codex_db then
-      warned_about_codex_db = true
-      rex.log("warn", "can't read Codex's threads from " .. db_path .. ", using fallbacks: "
-        .. tostring(result and result.stderr))
-    end
-    return nil
-  end
-  if not result.stdout:find("%S") then return {} end
-  local ok, threads = pcall(rex.json.decode, result.stdout)
-  if not ok or type(threads) ~= "table" then return nil end
-  for _, thread in ipairs(threads) do
-    thread.written_since_start = (tonumber(thread.updated_ms) or 0) >= started_ms
-  end
-  return threads
-end
-
--- The Codex thread `foreground` (a Codex process in `pane`) is on, or nil and
--- why. `folder_is_shared` says another Codex runs in the same folder.
-local function detect_codex(pane, foreground, folder_is_shared)
-  local ps = rex.exec({ "ps", "-ww", "-o", "etime=,args=", "-p", tostring(foreground.pid) }, { timeout = 5 })
-  local age_seconds, argv = lib.parse_ps_line(ps and ps.ok and ps.stdout)
-  if not age_seconds then return nil end
-  local resume_target = lib.codex_resume_target(argv)
-  local title_reply = terminal_call(pane, "title")
-  local title = title_reply and title_reply.title
-  local started_ms = (os.time() - age_seconds - 2) * 1000
-  local threads = query_codex_threads(foreground.cwd, started_ms, resume_target)
-  local id, why
-  if threads then id, why = lib.choose_codex_thread(threads, title, resume_target, folder_is_shared) end
-  if not id and resume_target and resume_target.uuid then id = resume_target.uuid end
-  if not id then
-    local index_text = read_file(CODEX_DIR .. "/session_index.jsonl")
-    id = lib.codex_id_from_index(index_text, lib.codex_thread_name_from_title(title), rex.json.decode)
-      or (resume_target and lib.codex_id_from_index(index_text, resume_target.name, rex.json.decode))
-  end
-  if not id then return nil, why end
-  return { agent = "codex", id = id, cwd = foreground.cwd }
+-- The registered agent whose program is `foreground`, or nil.
+local function agent_of(foreground)
+  return foreground and agents.by_program[lib.program_name(foreground)]
 end
 
 -- State -----------------------------------------------------------------------
@@ -235,35 +149,38 @@ local function sweep_panes(timed)
   -- A failed or empty read never replaces what is recorded.
   if not complete or #panes == 0 then return end
   local now = os.time()
-  local process_by_pane, codex_count_by_folder = {}, {}
+  -- Every pane's process, and the panes each agent runs in (its detect's `peers`).
+  local process_by_pane, peers_by_agent = {}, {}
   for _, pane in ipairs(panes) do
     local process = terminal_call(pane, "process")
     process_by_pane[pane.block_id] = process
-    local foreground = type(process) == "table" and process.foreground
-    if foreground and lib.program_name(foreground) == "codex" and foreground.cwd then
-      codex_count_by_folder[foreground.cwd] = (codex_count_by_folder[foreground.cwd] or 0) + 1
+    local foreground = type(process) == "table" and process.foreground or nil
+    local agent = foreground and foreground.pid and agent_of(foreground)
+    if agent then
+      peers_by_agent[agent.name] = peers_by_agent[agent.name] or {}
+      table.insert(peers_by_agent[agent.name], { pane = pane, foreground = foreground })
     end
   end
   local live_panes = {}
   for _, pane in ipairs(panes) do
     live_panes[pane.block_id] = true
     local process = process_by_pane[pane.block_id]
-    local foreground = type(process) == "table" and process.foreground
-    local program = foreground and foreground.pid and lib.program_name(foreground)
+    local foreground = type(process) == "table" and process.foreground or nil
+    local agent = foreground and foreground.pid and agent_of(foreground) or nil
     local found, why
-    if program == "claude" then
-      found = detect_claude(foreground)
-    elseif program == "codex" then
-      found, why = detect_codex(pane, foreground, (codex_count_by_folder[foreground.cwd] or 0) > 1)
+    if agent then
+      local ok, detected, reason = pcall(agent.detect, pane, foreground, peers_by_agent[agent.name], host)
+      if ok then found, why = detected, reason else why = "its detect failed: " .. tostring(detected) end
+      if found then found.agent = agent.name end
     end
-    local finding = lib.classify_finding(process ~= nil, program, found ~= nil)
+    local finding = lib.classify_finding(process ~= nil, agent, found ~= nil)
     if finding == lib.FINDING.AGENT then
       found.session = pane.session
       if lib.record_agent(state, pane.block_id, found, now) then
         log("recorded " .. found.agent .. " " .. found.id .. " in " .. tostring(pane.session))
       end
     elseif finding == lib.FINDING.AGENT_UNIDENTIFIED then
-      if why then rex.log("warn", program .. " in " .. tostring(pane.session) .. ": " .. why) end
+      if why then rex.log("warn", agent.name .. " in " .. tostring(pane.session) .. ": " .. why) end
     elseif finding == lib.FINDING.NO_AGENT then
       if lib.note_agent_missing(state, pane.block_id, false, timed) then
         log("forgot the agent in " .. tostring(pane.session) .. ": it stopped")
@@ -299,7 +216,8 @@ local function look_at_pane(pane, entry, typed_on_disk)
   local process = terminal_call(pane, "process")
   local foreground = type(process) == "table" and process.foreground
   if not foreground then return look end
-  look.agent_running = lib.program_name(foreground) == entry.agent
+  local running = agent_of(foreground)
+  look.agent_running = running ~= nil and running.name == entry.agent
   look.at_shell = lib.is_at_shell(process)
   look.shell = lib.program_name(foreground)
   if look.at_shell and lib.TYPEABLE_SHELLS[look.shell] then
@@ -324,7 +242,7 @@ local function resume_recorded_agents(restore, deadline, on_done, manual)
   local panes = {} -- block_id -> { entry, state, prompt_line, why }
   for _, planned in ipairs(lib.plan_restore(restore)) do
     if not restore.typed[planned.block_id] then
-      local command, why = lib.resume_command(planned.entry)
+      local command, why = lib.resume_command(planned.entry, agents)
       panes[planned.block_id] = { entry = planned.entry, command = command,
                                   state = command and S.WAITING or S.FAILED, why = why }
     end
@@ -439,7 +357,7 @@ local function run_watcher()
   phase = "running"
   log("watcher " .. tostring(my_pid) .. " started for server " .. server_info.instance_id)
 
-  local saved_state = lib.sanitize_state(read_json(STATE_FILE))
+  local saved_state = lib.sanitize_state(read_json(STATE_FILE), agents)
   if saved_state.instance_id and saved_state.instance_id ~= server_info.instance_id then
     -- The first look at a new server: what the last one ran is to be restored,
     -- unless a watcher started at the same moment got there first.
@@ -518,7 +436,7 @@ local function run_manual_resume()
 end
 
 local function print_status()
-  local recorded = lib.sanitize_state(read_json(STATE_FILE))
+  local recorded = lib.sanitize_state(read_json(STATE_FILE), agents)
   print("server " .. tostring(recorded.instance_id) .. ", last timed sweep " ..
     (recorded.swept_at and os.date("%H:%M:%S", recorded.swept_at) or "never"))
   for _, entry in pairs(recorded.panes) do

@@ -161,7 +161,7 @@ Start with `watcher.log`. Each pane resumed has a `resumed …` line; anything t
 ## Limits
 
 - Agents resume with their default options: flags such as `--model` or a permission mode aren't carried over.
-- Only Claude Code and Codex, and only panes running zsh, bash or fish.
+- Only Claude Code and Codex for now (others can be added: see [Adding an agent](#adding-an-agent)), and only panes running zsh, bash or fish.
 - A pane closed while Rex was down isn't brought back.
 - A shell left in vi command mode (not insert mode) may not take the typed line correctly.
 - A folder whose path holds a backslash isn't restored, because fish reads single-quoted backslashes differently from zsh and bash.
@@ -176,9 +176,39 @@ Start with `watcher.log`. Each pane resumed has a `resumed …` line; anything t
 | --- | --- |
 | `init.lua` | Not a Rex config: lets `require("rex-agent-resume")` load the tool when the repository sits beside your `init.lua`. |
 | `rex-agent-resume.lua` | Loaded by your `init.lua`: starts the watcher and adds the Resume Agents action. |
-| `watcher.lua` | The watcher, plus `mode=resume` and `mode=status`. Everything that talks to Rex. |
-| `lib.lua` | The logic that doesn't need Rex: parsing, choosing a Codex thread, when to forget, the restore states. The tests cover it. |
+| `watcher.lua` | The watcher, plus `mode=resume` and `mode=status`. Everything that talks to Rex. It knows no agent by name: it asks the registry. |
+| `lib.lua` | The logic that doesn't need Rex or any agent: the registry, parsing, when to forget, the restore states. The tests cover it. |
+| `agents/init.lua` | The registry: the list of agents, and what an agent file must provide. |
+| `agents/claude.lua`, `agents/codex.lua` | One file per agent: how to tell which conversation runs in a pane, and the command that resumes it. |
 | `install.sh` | Adds the tool to `init.lua`, or `--uninstall` takes it out. |
+
+### Adding an agent
+
+Each agent is one file in `agents/`, loaded with `lib.lua` as its argument. It returns a table:
+
+```lua
+local lib = ...
+
+return {
+  name = "myagent",              -- recorded in state.json
+  programs = { "myagent" },      -- foreground program names that mean it runs
+  is_valid_id = lib.is_uuid,     -- the ID is typed into a shell: accept only safe ones
+  resume_command = function(id) return "myagent --resume " .. id end,
+  -- Which conversation runs in this pane: { id = ..., cwd = ... }, or nil and why.
+  -- `peers` is every pane this agent runs in now, for an agent that needs to
+  -- compare (Codex checks whether another Codex shares the folder).
+  detect = function(pane, foreground, peers, host)
+    local session = host.read_json(host.home .. "/.myagent/sessions/" .. foreground.pid .. ".json")
+    return session and { id = session.id, cwd = foreground.cwd }
+  end,
+}
+```
+
+All five fields are required, and the registry refuses any other, so a misspelled one shows when the watcher starts. The core calls only these five; anything else the agent needs stays `local` to its file. Then add its name to `AGENTS` in `agents/init.lua`. The watcher finds the agent's panes by program name, records what `detect` returns, and types `cd <folder> && <resume_command>` after a restart. Everything else (when to forget, the restore states, typing once per pane) is shared.
+
+An agent uses only `host` (files, commands, the pane's terminal; listed in `agents/init.lua`), never `rex` itself, so its tests can call its five functions with a fake host: see `test/agents_spec.lua`. The core's own tests, in `test/lib_spec.lua`, use made-up agents. The registry refuses a malformed agent, or two agents claiming one program, when the watcher starts.
+
+### Tests
 
 Run the tests with Lua 5.1 (the version Rex embeds), or with Rex itself:
 
