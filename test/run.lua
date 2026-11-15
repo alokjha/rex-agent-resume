@@ -3,9 +3,11 @@
 
 local src = debug.getinfo(1, "S").source:gsub("^@", "")
 local root = (src:match("^(.*)/test/[^/]*$") or ".")
-local lib = dofile(root .. "/lib.lua")
-local agents = dofile(root .. "/agents/init.lua")(lib)
-local specs = { "lib_spec", "agents_spec" }
+local core = dofile(root .. "/core/init.lua")
+core.fakes = assert(loadfile(root .. "/test/fakes.lua"))(core)
+local agents, skipped_agents = dofile(root .. "/agents/init.lua")(core)
+for _, problem in ipairs(skipped_agents) do print("FAIL loading agents: " .. problem) end
+local specs = { "recording_spec", "restore_spec", "protocol_spec", "claude_spec", "codex_spec" }
 
 -- Counts in a table, not locals: in Rex's Lua, once a pcall inside a test has
 -- caught an error, a closure's later assignments to outer locals are lost.
@@ -28,8 +30,8 @@ local function t(name, fn)
   end
 end
 
-for _, name in ipairs(specs) do dofile(root .. "/test/" .. name .. ".lua")(t, lib, agents) end
+for _, name in ipairs(specs) do dofile(root .. "/test/" .. name .. ".lua")(t, core, agents) end
 print(string.format("%d passed, %d failed", count.passed, count.failed))
-if count.failed > 0 then
+if count.failed > 0 or #skipped_agents > 0 then
   if rex then rex.stop(1) else os.exit(1) end
 end

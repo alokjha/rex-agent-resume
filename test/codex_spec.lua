@@ -1,65 +1,9 @@
--- Tests for the agents in agents/, through their contract only (see
--- agents/init.lua) and a fake host, so they need no Rex, Claude Code or Codex.
+-- Tests for agents/codex, through the Agent protocol only, with a fake host.
 
-return function(t, lib, agents)
-  local A = "0193f2a4-5b6c-7d8e-9f01-23456789abcd"
-  local B = "3f2a1b4c-5d6e-4f70-8192-a3b4c5d6e7f8"
-  local claude, codex = agents.by_name.claude, agents.by_name.codex
-
-  -- A host with these files (path -> text, or a table for read_json), these
-  -- command results (argv[1] -> { ok, stdout }), these JSON texts (text ->
-  -- value) and this pane title.
-  local function fake_host(o)
-    local files, commands, json = o.files or {}, o.commands or {}, o.json or {}
-    return {
-      home = "/home/me",
-      getenv = function() return nil end,
-      now = function() return 1000 end,
-      read_file = function(path) local f = files[path] return type(f) == "string" and f or nil end,
-      read_json = function(path) local f = files[path] return type(f) == "table" and f or nil end,
-      decode_json = function(text)
-        if json[text] == nil then error("not JSON: " .. text) end
-        return json[text]
-      end,
-      exec = function(argv) return commands[argv[1]] end,
-      warn = function() end,
-      terminal_call = function(_, method) if method == "title" then return { title = o.title } end end,
-    }
-  end
+return function(t, core, agents)
+  local codex, fake_host = agents.by_name.codex, core.fakes.host
+  local A, B = core.fakes.A, core.fakes.B
   local pane = { block_id = "block:1", session = "s" }
-
-  t("the registry has claude and codex", function(eq)
-    eq(agents.by_program.claude, claude)
-    eq(agents.by_program.codex, codex)
-  end)
-
-  t("claude: resume_command and is_valid_id", function(eq)
-    eq(claude.resume_command(B), "claude --resume " .. B)
-    eq(claude.is_valid_id(B), true)
-    eq(claude.is_valid_id("x; rm"), false)
-  end)
-
-  t("claude: detect reads the session file", function(eq)
-    local found = claude.detect(pane, { pid = 42, cwd = "/x" }, {}, fake_host({
-      files = { ["/home/me/.claude/sessions/42.json"] = { pid = 42, sessionId = B, cwd = "/proj" } },
-      commands = { ["/bin/sh"] = { ok = true } } }))
-    eq(found and found.id, B)
-    eq(found and found.cwd, "/proj")
-    -- No transcript yet: nothing to resume.
-    eq(claude.detect(pane, { pid = 43 }, {}, fake_host({
-      files = { ["/home/me/.claude/sessions/43.json"] = { pid = 43, sessionId = A } },
-      commands = { ["/bin/sh"] = { ok = false } } })), nil)
-    -- A session file left by another process.
-    eq(claude.detect(pane, { pid = 44 }, {}, fake_host({
-      files = { ["/home/me/.claude/sessions/44.json"] = { pid = 9, sessionId = A } },
-      commands = { ["/bin/sh"] = { ok = true } } })), nil)
-  end)
-
-  t("codex: resume_command and is_valid_id", function(eq)
-    eq(codex.resume_command(A), "codex resume " .. A)
-    eq(codex.is_valid_id(A), true)
-    eq(codex.is_valid_id("newAppIdea"), false)
-  end)
 
   -- A Codex host: the TUI's command line (10 seconds old), the thread rows
   -- the database returns (nil: it can't be read), session_index.jsonl and the title.
