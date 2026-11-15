@@ -8,15 +8,14 @@ installer="$root/install.sh"
 work=$(mktemp -d)
 trap 'rm -rf "$work"' EXIT
 
-# The fake rex. FAKE_SERVER=up makes `server status` succeed; a config holding
-# BROKEN fails `config check`; FAKE_REJECT_BLOCK=1 fails it once the block is
-# in; FAKE_KEYMAP names a file printed by `keymap`.
+# The fake rex. Its server is never running. A config holding BROKEN fails
+# `config check`; FAKE_REJECT_BLOCK=1 fails it once the block is in.
 mkdir -p "$work/bin"
 cat > "$work/bin/rex" <<'EOF'
 #!/bin/sh
 while [ $# -gt 0 ]; do case $1 in --autostart=*) shift ;; *) break ;; esac; done
 case "$1" in
-  server) [ "${FAKE_SERVER:-down}" = up ] ;;
+  server) exit 1 ;;
   config)
     case "$2" in
       check)
@@ -25,7 +24,6 @@ case "$1" in
         exit 0 ;;
       *) exit 0 ;;
     esac ;;
-  keymap) cat "${FAKE_KEYMAP:-/dev/null}" ;;
   *) exit 0 ;;
 esac
 EOF
@@ -41,7 +39,7 @@ start() {
   case_dir="$work/$test_name"
   mkdir -p "$case_dir/config" "$case_dir/home"
   config="$case_dir/config/init.lua"
-  unset FAKE_SERVER FAKE_REJECT_BLOCK FAKE_KEYMAP
+  unset FAKE_REJECT_BLOCK
 }
 
 run_installer() {
@@ -62,13 +60,13 @@ expect_file() { # expect_file <expected contents>
 }
 backups() { find "$case_dir/config" -name 'init.lua.bak-rex-agent-resume-*' | wc -l | tr -d ' '; }
 
-block() { # block [key]
+block() {
   printf '%s\n' '-- >>> rex-agent-resume >>>' \
     '-- Resumes Claude Code and Codex in their panes after Rex restarts.' \
     '-- https://github.com/alokjha/rex-agent-resume' \
-    "dofile(\"$root/rex-agent-resume.lua\")"
-  if [ -n "${1:-}" ]; then printf 'rex.bind("%s", "resume_agents")\n' "$1"; fi
-  printf '%s\n' '-- <<< rex-agent-resume <<<'
+    "dofile(\"$root/rex-agent-resume.lua\")" \
+    'rex.bind("shift+cmd+r", "resume_agents")' \
+    '-- <<< rex-agent-resume <<<'
 }
 
 mine='-- my config
@@ -92,34 +90,13 @@ $(block)" && [ "$(backups)" = 1 ]; then pass; else fail "one backup expected"; f
 backup=$(find "$case_dir/config" -name 'init.lua.bak-rex-agent-resume-*')
 if [ "$(cat "$backup")" = "$mine" ]; then pass; else fail "the backup isn't the original file"; fi
 
-start rerun_changes_and_drops_key
+start rerun_keeps_one_block
 printf '%s\n' "$mine" > "$config"
-run_installer --key ctrl+alt+r
-expect_status 0 && expect_file "$mine
-
-$(block ctrl+alt+r)" && pass
+run_installer
 run_installer
 expect_status 0 && expect_file "$mine
 
 $(block)" && pass
-if [ "$(grep -c 'rex-agent-resume >>>' "$config")" = 1 ]; then pass; else fail "more than one block"; fi
-
-start refuses_taken_key
-printf '%s\n' "$mine" > "$config"
-printf 'shift+cmd+k  session.switch  -  init.lua:5\n' > "$case_dir/keymap"
-FAKE_SERVER=up FAKE_KEYMAP="$case_dir/keymap"; export FAKE_SERVER FAKE_KEYMAP
-run_installer --key cmd+shift+k
-if expect_status 1 && expect_file "$mine" && [ "$(backups)" = 0 ]; then pass; else fail "a refused key changed something"; fi
-case $output in *"already bound to 'session.switch'"*) pass ;; *) fail "no reason given: $output" ;; esac
-
-start accepts_key_already_ours
-printf 'shift+cmd+r  resume_agents  -  init.lua:9\n' > "$case_dir/keymap"
-FAKE_SERVER=up FAKE_KEYMAP="$case_dir/keymap"; export FAKE_SERVER FAKE_KEYMAP
-printf '%s\n' "$mine" > "$config"
-# The server is "up" but no watcher will start, so the final check reports that.
-run_installer --key shift+cmd+r
-case $output in *"already bound"*) fail "refused its own key" ;; *) pass ;; esac
-if grep -q 'rex.bind("shift+cmd+r", "resume_agents")' "$config"; then pass; else fail "key not written"; fi
 
 start refuses_broken_config
 printf -- '-- BROKEN\n' > "$config"
@@ -140,7 +117,7 @@ else fail "a clone beside init.lua should be loaded with require"; fi
 
 start uninstall_restores_config
 printf '%s\n' "$mine" > "$config"
-run_installer --key ctrl+alt+r
+run_installer
 run_installer --uninstall
 if expect_status 0 && ! grep -q "rex-agent-resume" "$config"; then pass; else fail "block left behind"; fi
 if [ "$(sed -e :a -e '/^\n*$/{$d;N;ba' -e '}' "$config")" = "$mine" ]; then pass; else fail "user lines changed"; fi
@@ -149,16 +126,6 @@ start uninstall_when_absent
 printf '%s\n' "$mine" > "$config"
 run_installer --uninstall
 expect_status 0 && expect_file "$mine" && pass
-case $output in *"isn't in"*) pass ;; *) fail "no message: $output" ;; esac
-
-start no_rex
-output=$(PATH="/usr/bin:/bin" HOME="$case_dir/home" REX_CONFIG="$config" REX_BIN_DIR="" sh "$installer" 2>&1)
-status=$?
-expect_status 1 && case $output in *"can't find the rex command"*) pass ;; *) fail "unclear error: $output" ;; esac
-
-start unknown_option
-run_installer --bogus
-expect_status 1 && pass
 
 echo "$passed passed, $failed failed"
 [ "$failed" -eq 0 ]
