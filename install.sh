@@ -97,8 +97,10 @@ backup
 {
   if [ -f "$config" ]; then without_block; fi
 } > "$config.tmp"
+needs_blank_line=
+if [ -s "$config.tmp" ]; then needs_blank_line=1; fi
 {
-  if [ -s "$config.tmp" ]; then echo; fi
+  if [ -n "$needs_blank_line" ]; then echo; fi
   echo "$begin"
   echo "-- Resumes Claude Code and Codex in their panes after Rex restarts."
   echo "-- https://github.com/alokjha/rex-agent-resume"
