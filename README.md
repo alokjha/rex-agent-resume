@@ -66,9 +66,13 @@ resumed 1, already running 8, not resumed 0
 - **Update:** `git -C ~/.config/rex/rex-agent-resume pull`, then `rex config reload`.
 - **Remove:** `~/.config/rex/rex-agent-resume/install.sh --uninstall`. Installed by hand: delete the lines you added, reload, and [stop the watcher](docs.md#what-installsh-does).
 
+## Other agents
+
+Want support for another agent? Follow [adding an agent](docs.md#adding-an-agent) in docs.md.
+
 ## More
 
-[docs.md](docs.md) explains [how it works](docs.md#how-it-works), [troubleshooting](docs.md#troubleshooting), [limits](docs.md#limits), and [adding another agent](docs.md#adding-an-agent).
+[docs.md](docs.md) explains [how it works](docs.md#how-it-works), [troubleshooting](docs.md#troubleshooting) and [limits](docs.md#limits).
 
 ## History and credits
 
