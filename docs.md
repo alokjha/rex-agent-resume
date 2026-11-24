@@ -7,6 +7,7 @@ For installing and using it, see the [README](README.md).
 - [Files](#files)
 - [Troubleshooting](#troubleshooting)
 - [Limits](#limits)
+- [History](#history)
 - [Develop](#develop)
 
 ## How it works
@@ -96,6 +97,15 @@ Start with `watcher.log`. Each pane resumed has a `resumed …` line; anything t
 - `CLAUDE_CONFIG_DIR` and `CODEX_HOME` are read from the Rex server's environment, not from each agent's.
 - Codex's database and index are Codex's own formats and may change between versions. Each has a fallback, and the log says when one is used.
 - `rex config check` runs `init.lua`, so it starts a watcher too. That one replaces the running watcher, which is harmless.
+
+## History
+
+This grew out of a resume script written for the author's own Rex setup and tested over several real restarts. Its approach is still the core of this one:
+
+- the conversation each pane runs, from Claude Code's per-process session file, and for Codex from `codex resume <id>` or the conversation name in the pane's title, looked up in `session_index.jsonl` (which covers plain `codex` and `codex resume <name>`);
+- a record keyed by Rex's pane IDs, which survive restarts;
+- resuming once per new server, only into panes back at a shell prompt, never twice into one pane;
+- one watcher at a time, the newest replacing an older or stuck one, and the Resume Agents action.
 
 ## Develop
 

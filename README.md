@@ -36,7 +36,7 @@ rex.bind("shift+cmd+r", "resume_agents")
 
 and run `rex config reload`. A clone elsewhere is loaded with `dofile("/path/to/rex-agent-resume/rex-agent-resume.lua")`.
 
-Run only one tool that resumes agents: two would type each resume command twice.
+Don't also run another tool that resumes agents, such as [sshtab](https://github.com/luongnv89/rex-extensions/tree/main/sshtab) (turn off its **Restore Agent Sessions**): both would type each resume command.
 
 ## Check that it works
 
@@ -76,14 +76,7 @@ Want support for another agent? Follow [adding an agent](docs.md#adding-an-agent
 
 ## History and credits
 
-This grew out of a resume script written for the author's own Rex setup and tested over several real restarts. Its approach is still the core of this one:
-
-- the conversation each pane runs, from Claude Code's per-process session file, and for Codex from `codex resume <id>` or the conversation name in the pane's title, looked up in `session_index.jsonl` (which covers plain `codex` and `codex resume <name>`);
-- a record keyed by Rex's pane IDs, which survive restarts;
-- resuming once per new server, only into panes back at a shell prompt, never twice into one pane;
-- one watcher at a time, the newest replacing an older or stuck one, and the Resume Agents action.
-
-Two other projects solving the same problem had ideas worth adding, reimplemented here:
+This grew out of a resume script for the author's own Rex setup ([history](docs.md#history)). Ideas from two other projects are reimplemented here:
 
 - [thomasschafer/dotfiles#11](https://github.com/thomasschafer/dotfiles/pull/11): finding a Codex conversation in Codex's state database, and checking that a Claude transcript exists before recording its ID;
 - [sshtab](https://github.com/luongnv89/rex-extensions/tree/main/sshtab): forgetting an agent only after two missed checks, so stopping Rex doesn't erase it, and waiting for a steady prompt before typing.
