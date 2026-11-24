@@ -1,5 +1,9 @@
 # Changelog
 
+## Unreleased
+
+- Fix: when Rex stopped again while a restore was still running, such as a force quit right after a restart, the agents it hadn't finished were lost. The next restart now restores them too.
+
 ## 0.1.0 (2026-11-16)
 
 First release.

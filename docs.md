@@ -41,6 +41,7 @@ A pane counts as ready when its foreground program is the shell Rex started (zsh
 - A conversation recorded in two panes is resumed in the first only.
 - A pane already running its agent is left alone.
 - After 120 seconds the restore is finished: panes that weren't ready are left as they are, and a macOS notification lists them. A finished restore never runs again, even after a config reload.
+- If Rex stops again before a restore finishes (within its 120 seconds), the next server restores that restore's panes too, as well as what it recorded itself.
 
 ## What install.sh does
 

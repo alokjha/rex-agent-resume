@@ -62,7 +62,7 @@ local function run_watcher()
 
   local saved = recording.sanitize_state(files.read_json(watcher.paths.state_file), agents)
   local to_restore, save_now
-  watcher.state, to_restore, save_now = recording.start(saved, watcher.server.instance_id, files.read_json(watcher.paths.restore_file))
+  watcher.state, to_restore, save_now = recording.start(saved, watcher.server.instance_id, files.read_json(watcher.paths.restore_file), os.time())
   if to_restore then files.write_json(watcher.paths.restore_file, to_restore, watcher.pid) end
   if save_now then files.write_json(watcher.paths.state_file, watcher.state, watcher.pid) end
 

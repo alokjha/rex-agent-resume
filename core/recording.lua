@@ -42,17 +42,39 @@ function M.sanitize_state(raw, registry)
   return raw
 end
 
--- The state a watcher starts with on server `instance_id`, given `saved`, the
--- sanitized state.json, and `existing_restore`, restore.json. Returns the
--- state, the restore.json to write or nil, and whether to save the state now.
--- On the first look at a new server, what the last one ran is to be restored,
--- unless a watcher started at the same moment wrote that restore already.
-function M.start(saved, instance_id, existing_restore)
+-- The panes of a restore cut short: one for the server `saved` was recorded
+-- on, unfinished when that server stopped within the restore window (its last
+-- timed sweep, if any, came inside the window). Its agents were killed before,
+-- or soon after, they were typed and recorded again, so they are restored
+-- again, however long Rex stayed down. An older or finished restore gives
+-- none, so an agent quit since isn't brought back.
+local function panes_of_cut_short_restore(existing_restore, saved)
+  if type(existing_restore) ~= "table" or existing_restore.for_instance ~= saved.instance_id then return {} end
+  if existing_restore.state ~= restore.RESTORE_STATE.PENDING then return {} end
+  local created_at = existing_restore.created_at
+  if type(created_at) ~= "number" then return {} end
+  if saved.swept_at and saved.swept_at > created_at + restore.WINDOW_SECONDS then return {} end
+  if type(existing_restore.panes) ~= "table" then return {} end
+  local panes = {}
+  for block_id, entry in pairs(existing_restore.panes) do panes[block_id] = entry end
+  return panes
+end
+
+-- The state a watcher starts with on server `instance_id` at time `now`, given
+-- `saved`, the sanitized state.json, and `existing_restore`, restore.json.
+-- Returns the state, the restore.json to write or nil, and whether to save the
+-- state now. On the first look at a new server, what the last one ran is to be
+-- restored, with what its own restore hadn't finished, unless a watcher
+-- started at the same moment wrote that restore already.
+function M.start(saved, instance_id, existing_restore, now)
   if saved.instance_id == instance_id then return saved, nil, false end
   if not saved.instance_id then return M.new_state(instance_id), nil, false end
   local already = type(existing_restore) == "table" and existing_restore.for_instance == instance_id
-  local to_restore = not already and { for_instance = instance_id, from_instance = saved.instance_id,
-    state = restore.RESTORE_STATE.PENDING, panes = saved.panes, typed = {} } or nil
+  if already then return M.new_state(instance_id), nil, true end
+  local panes = panes_of_cut_short_restore(existing_restore, saved)
+  for block_id, entry in pairs(saved.panes) do panes[block_id] = entry end
+  local to_restore = { for_instance = instance_id, from_instance = saved.instance_id, created_at = now,
+    state = restore.RESTORE_STATE.PENDING, panes = panes, typed = {} }
   return M.new_state(instance_id), to_restore, true
 end
 
