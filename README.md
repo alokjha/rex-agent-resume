@@ -1,5 +1,7 @@
 # rex-agent-resume
 
+![Rex restarts, then Claude Code and Codex resume in their panes](assets/demo.gif)
+
 Brings your Claude Code and Codex conversations back into their [Rex](https://www.superlogical.com/rex) panes after Rex is stopped completely and started again.
 
 Rex brings back your sessions, tabs, splits and each pane's folder, but not the programs that ran in them: you get plain shells. This tool remembers which conversation ran in which pane, and once Rex is back, types the command that resumes it:
